@@ -81,11 +81,9 @@ HOSTNAME=localhost
 # 本地单用户模式可设为 true；局域网多人共享建议保持 false
 QUESTION_BANK_SINGLE_USER_MODE=false
 
-COZE_WORKLOAD_IDENTITY_API_KEY=your-api-key
-COZE_INTEGRATION_MODEL_BASE_URL=your-model-url
 ```
 
-`COZE_INTEGRATION_MODEL_BASE_URL` 可使用 OpenAI 兼容接口，例如：
+可使用 OpenAI 兼容接口，例如：
 
 - 阿里百炼：`https://dashscope.aliyuncs.com/compatible-mode/v1`
 - 火山方舟：`https://ark.cn-beijing.volces.com/api/v3`
@@ -118,17 +116,6 @@ pnpm start
 data/knowledge/knowledge.db
 ```
 
-它包含已导入的国标文档、结构化分块、FTS 索引和向量索引。为了避免提交 SQLite 运行时临时文件，以下文件已被 `.gitignore` 忽略：
-
-```text
-data/knowledge/*.db-wal
-data/knowledge/*.db-shm
-data/knowledge/*.db-journal
-```
-
-如果你重新导入文档并希望把新的知识库提交到 GitHub，建议先停止服务，确保 SQLite WAL 已写回主库，再提交 `data/knowledge/knowledge.db`。
-
-> 注意：当前数据库也可能包含本地题库、答题记录、掌握状态和 AI 讲解缓存。如果仓库公开发布，请先确认这些数据可以公开，或清理用户学习数据后再提交。
 
 ## 局域网访问
 
@@ -271,31 +258,6 @@ pnpm exec tsx scripts/assessment-report-content.test.ts
 pnpm exec tsx scripts/learning-report-normalized-types.test.ts
 pnpm exec tsx scripts/explainer-learning-path-config.test.ts
 ```
-
-## Git 提交注意事项
-
-以下内容不应提交：
-
-- `.env.local`
-- `node_modules/`
-- `.next/`
-- `dist/`
-- `tmp/`
-- `output/`
-- `data/knowledge/*.db-wal`
-- `data/knowledge/*.db-shm`
-
-本仓库当前允许提交：
-
-- `data/knowledge/knowledge.db`
-
-如果你不希望公开题库和答题历史，请先净化数据库后再推送。
-
-## Windows Server 部署
-
-Windows Server 2019 部署说明见：
-
-- [`WINDOWS_SERVER_DEPLOY.md`](./WINDOWS_SERVER_DEPLOY.md)
 
 ## License
 
