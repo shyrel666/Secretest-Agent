@@ -258,7 +258,3 @@ pnpm exec tsx scripts/assessment-report-content.test.ts
 pnpm exec tsx scripts/learning-report-normalized-types.test.ts
 pnpm exec tsx scripts/explainer-learning-path-config.test.ts
 ```
-
-## License
-
-当前项目未声明开源协议。公开仓库如需他人使用、分发或二次开发，建议补充 `LICENSE` 文件。
