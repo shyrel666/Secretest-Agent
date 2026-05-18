@@ -101,6 +101,9 @@ output/
 
 .coze-logs
 
+# Local agent planning artifacts
+docs/superpowers/
+
 # Knowledge base data
 data/*
 !data/knowledge/
