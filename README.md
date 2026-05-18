@@ -1,238 +1,302 @@
 # Secretest Agent
 
-Secretest Agent 是一个基于多 Agent 协作的智能代码安全审计平台。上传国标 PDF 文档构建知识库，AI 自动出题、审核、讲解，形成完整的漏洞审计学习闭环。
+Secretest Agent 是一个基于国标知识库和多 Agent 协作的代码安全审计、学习与测评平台。系统围绕「代码审计 → 能力测评 → 题库练习 → 错题讲解 → 学习报告」形成闭环，帮助开发者和安全测试人员按标准化漏洞类型持续训练审计能力。
 
-## 部署文档
+## 核心能力
 
-- Windows Server 2019 部署说明：[`WINDOWS_SERVER_DEPLOY.md`](./WINDOWS_SERVER_DEPLOY.md)
+- **代码审计 Agent**：基于 LLM 的代码安全分析，支持流式输出和上下文对话。
+- **内置国标知识库**：本仓库保留 `data/knowledge/knowledge.db`，克隆后即可使用已导入的知识库数据。
+- **智能测评**：出题 Agent、审核 Agent、讲解 Agent 协作生成测评题、审核题目质量并生成学习反馈。
+- **题库练习**：测评题自动入库，支持题库浏览、随机抽题、闪卡模式、错题筛选和 AI 讲解缓存。
+- **动态学习报告**：根据用户本次答题情况生成掌握点、薄弱点、学习建议和下一步主题。
+- **多模型配置**：支持全局模型配置，也支持为不同 Agent 单独设置模型、温度和思考模式。
 
-## 核心功能
+## 多 Agent 流程
 
-- **智能代码审计** — AI 驱动的代码安全分析，基于 GB/T 34944-2017 / GB/T 34943-2017 标准，支持流式输出
-- **知识库管理** — 上传国标 PDF 文档，构建专属知识库，支持语义搜索
-- **智能测评** — 多 Agent 协作出题、审核、讲解，闭环学习系统
-
-## 多 Agent 架构
-
-```
-知识库 → 出题Agent → 审核Agent → 用户答题 → 讲解Agent
-   ↑                                              ↓
-   └──────────── 学习报告 ←─────────────────────┘
+```text
+知识库 → 出题 Agent → 审核 Agent → 用户答题 → 讲解 Agent
+   ↑                                                ↓
+   └────────────── 学习报告 / 题库练习 ←────────────┘
 ```
 
 | Agent | 职责 |
-|-------|------|
-| 知识库 Agent | 文档导入、语义搜索 |
-| 出题 Agent | 基于知识库生成专业测评题目 |
-| 审核 Agent | 验证题目质量和准确性 |
-| 讲解 Agent | 错题讲解、学习路径建议 |
+| --- | --- |
+| 知识库 Agent | 文档导入、语义搜索、标准条款检索 |
+| 出题 Agent | 基于知识库生成漏洞审计题目 |
+| 审核 Agent | 校验题目是否符合标准、是否泄露答案、是否可答 |
+| 讲解 Agent | 错题讲解、学习路径建议、动态学习报告 |
+| Orchestrator | 协调各 Agent 的调用、补题、去重、覆盖率追踪 |
+
+## 技术栈
+
+| 类别 | 技术 |
+| --- | --- |
+| Framework | Next.js 16 App Router |
+| Core | React 19 |
+| Language | TypeScript 5 |
+| UI | shadcn/ui + Radix UI |
+| Styling | Tailwind CSS 4 |
+| AI SDK | coze-coding-dev-sdk |
+| Knowledge Store | SQLite + sqlite-vec + FTS5 |
+| State | Zustand 持久化 |
+| Package Manager | pnpm 9+ |
 
 ## 快速开始
 
-### 环境要求
+### 1. 克隆项目
 
-- Node.js 20+
-- pnpm 9+（项目限定，不支持 npm / yarn）
+```bash
+git clone https://github.com/shyrel666/Secretest-Agent.git
+cd Secretest-Agent
+```
 
-### 1. 安装依赖
+### 2. 安装依赖
+
+本项目限定使用 `pnpm`。
 
 ```bash
 pnpm install
 ```
 
-### 2. 配置环境变量
+### 3. 配置环境变量
 
-复制 `.env.local` 并填入你的 API 配置：
+复制环境变量模板：
+
+```bash
+cp .env.example .env.local
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+编辑 `.env.local`：
 
 ```env
-# 服务端口
 PORT=10929
+HOSTNAME=localhost
 
-# 监听地址
-# 本地开发可保留默认；如果要让局域网其他机器访问，必须配置为 0.0.0.0
-HOSTNAME=0.0.0.0
+# 本地单用户模式可设为 true；局域网多人共享建议保持 false
+QUESTION_BANK_SINGLE_USER_MODE=false
 
-# API Key（LLM 调用 + 知识库向量化 共用）
 COZE_WORKLOAD_IDENTITY_API_KEY=your-api-key
-
-# LLM + Embedding 端点（知识库向量化也使用此地址）
 COZE_INTEGRATION_MODEL_BASE_URL=your-model-url
 ```
 
-`COZE_INTEGRATION_MODEL_BASE_URL` 支持任何 OpenAI 兼容端点：
-- 阿里百炼（推荐，支持 Embedding）：`https://dashscope.aliyuncs.com/compatible-mode/v1`
+`COZE_INTEGRATION_MODEL_BASE_URL` 可使用 OpenAI 兼容接口，例如：
+
+- 阿里百炼：`https://dashscope.aliyuncs.com/compatible-mode/v1`
 - 火山方舟：`https://ark.cn-beijing.volces.com/api/v3`
 - DeepSeek：`https://api.deepseek.com/v1`
 
-> **知识库已内建**，文档向量化数据本地存储于 `data/knowledge/`，无需搭建外部知识库服务。
-
-> **局域网访问说明**：如果需要让同局域网的其他用户访问，除了开放防火墙端口外，还必须将 `HOSTNAME` 配置为 `0.0.0.0`。
-
-### 3. 启动开发服务器
+### 4. 启动开发服务
 
 ```bash
 pnpm dev
 ```
 
-打开 [http://localhost:10929](http://localhost:10929) 查看应用。支持热更新。
+打开：
 
-### 4. 构建与部署
+```text
+http://localhost:10929
+```
+
+### 5. 构建和生产启动
 
 ```bash
-# 构建生产版本
 pnpm build
-
-# 启动生产服务器
 pnpm start
 ```
 
-如果你要部署到一台全新的 Windows 服务器，请直接参考：
+## 内置知识库说明
 
-- [`WINDOWS_SERVER_DEPLOY.md`](./WINDOWS_SERVER_DEPLOY.md)
+仓库保留了主知识库数据库：
 
-如果只是局域网内临时共享访问，启动前请确保：
+```text
+data/knowledge/knowledge.db
+```
+
+它包含已导入的国标文档、结构化分块、FTS 索引和向量索引。为了避免提交 SQLite 运行时临时文件，以下文件已被 `.gitignore` 忽略：
+
+```text
+data/knowledge/*.db-wal
+data/knowledge/*.db-shm
+data/knowledge/*.db-journal
+```
+
+如果你重新导入文档并希望把新的知识库提交到 GitHub，建议先停止服务，确保 SQLite WAL 已写回主库，再提交 `data/knowledge/knowledge.db`。
+
+> 注意：当前数据库也可能包含本地题库、答题记录、掌握状态和 AI 讲解缓存。如果仓库公开发布，请先确认这些数据可以公开，或清理用户学习数据后再提交。
+
+## 局域网访问
+
+如果希望同局域网设备访问，需要在 `.env.local` 中设置：
 
 ```env
 HOSTNAME=0.0.0.0
 PORT=10929
+QUESTION_BANK_SINGLE_USER_MODE=false
 ```
 
-然后使用：
+然后访问：
 
 ```text
 http://服务器IP:10929
 ```
 
-进行访问。
+`QUESTION_BANK_SINGLE_USER_MODE=false` 可以避免新访问者自动继承本机最活跃用户的题库记录。只有本地单人使用时，才建议设置为 `true`。
 
-## 项目结构
+## 目录结构
 
-```
+```text
 src/
 ├── app/
 │   ├── api/
-│   │   ├── agent/route.ts              # Agent 协调 API
-│   │   ├── audit/route.ts              # 代码审计 API（流式）
-│   │   ├── explain/route.ts            # 讲解 API（流式）
-│   │   └── knowledge/
-│   │       ├── import/route.ts         # 知识库导入（PDF/TXT/MD）
-│   │       ├── search/route.ts         # 知识库语义搜索
-│   │       └── documents/route.ts      # 文档列表 & 删除
-│   ├── audit/page.tsx                  # 代码审计页面
-│   ├── knowledge/page.tsx              # 知识库管理页面
-│   ├── assessment/page.tsx             # 智能测评页面
-│   ├── settings/page.tsx               # 模型配置页面
-│   ├── layout.tsx                      # 根布局
-│   └── page.tsx                        # 首页
-├── lib/
-│   ├── knowledge/                      # 内建知识库（本地向量存储）
-│   │   ├── index.ts                    # LocalKnowledgeBase 统一 API
-│   │   ├── chunker.ts                  # 文本分块
-│   │   ├── embedder.ts                 # 向量化（DashScope text-embedding-v3）
-│   │   └── vector-store.ts             # JSON 文件存储 + 余弦相似度检索
-│   ├── agents/
-│   │   ├── types.ts                    # Agent 类型定义
-│   │   ├── knowledge-agent.ts          # 知识库 Agent
-│   │   ├── question-generator-agent.ts # 出题 Agent
-│   │   ├── reviewer-agent.ts           # 审核 Agent
-│   │   ├── explainer-agent.ts          # 讲解 Agent
-│   │   └── orchestrator.ts             # Agent 协调器
-│   ├── store/
-│   │   └── ai-config.ts               # 模型配置 Store (zustand)
-│   └── utils.ts                        # 工具函数
+│   │   ├── agent/route.ts              # Agent 协调接口
+│   │   ├── audit/route.ts              # 代码审计接口
+│   │   ├── explain/route.ts            # 错题讲解流式接口
+│   │   ├── knowledge/                  # 知识库导入、搜索、统计、文档管理
+│   │   ├── learning/                   # 学习中心 API
+│   │   └── question-bank/route.ts      # 题库练习 API
+│   ├── assessment/                     # 能力测评页面
+│   ├── audit/                          # 代码审计页面
+│   ├── knowledge/                      # 知识库管理页面
+│   ├── learning/                       # 学习中心页面
+│   ├── practice/                       # 题库练习页面
+│   ├── settings/                       # 模型配置页面
+│   ├── layout.tsx
+│   └── page.tsx
 ├── components/
-│   ├── layout/                         # 布局组件
-│   └── ui/                             # shadcn/ui 组件库
-└── hooks/                              # 自定义 Hooks
+│   ├── layout/
+│   ├── providers/
+│   └── ui/
+├── lib/
+│   ├── agents/                         # 多 Agent 实现
+│   ├── knowledge/                      # SQLite 知识库、向量检索、混合检索
+│   ├── learning/                       # 学习主题、课程缓存
+│   ├── question-bank/                  # 题库 SQLite 存储
+│   ├── store/                          # Zustand stores
+│   ├── standards.ts                    # 国标语言映射
+│   └── user-context.ts                 # 匿名用户上下文
+└── server.ts                           # 自定义 Next.js 服务入口
 
-data/                                   # 运行时数据（已加入 .gitignore）
+data/
 └── knowledge/
-    └── vulnerability_audit_standards/
-        └── docs/                       # 每个文档的分块向量 JSON
+    └── knowledge.db                    # 已保留的内置知识库 SQLite 数据库
 ```
 
-## API 接口
+## API 概览
 
-### POST /api/audit
-代码安全审计（流式 SSE 输出）
+### 代码审计
+
+```http
+POST /api/audit
+```
+
+请求示例：
 
 ```json
-{ "code": "代码内容", "history": [], "config": { "model": "...", "temperature": 0.3 } }
+{
+  "code": "代码内容",
+  "history": [],
+  "config": {
+    "model": "doubao-seed-2-0-pro-260215",
+    "temperature": 0.3,
+    "thinking": true
+  }
+}
 ```
 
-### POST /api/agent
-Agent 协调接口，通过 `action` 字段区分操作：
+### Agent 协调
+
+```http
+POST /api/agent
+```
 
 | action | 说明 |
-|--------|------|
+| --- | --- |
 | `generateQuestion` | 生成单个审核通过的题目 |
 | `generateQuizSet` | 生成整套测评题 |
-| `explainAnswer` | 讲解答题结果 |
-| `generateReport` | 生成学习报告 |
+| `explainAnswer` | 讲解用户答题 |
+| `generateReport` | 根据答题结果生成学习报告 |
 
-### POST /api/explain
-错题讲解（流式 SSE 输出）
+### 题库练习
 
-### POST /api/knowledge/import
-上传文档到知识库，支持 PDF / TXT / MD 格式
+```http
+GET /api/question-bank?action=stats
+GET /api/question-bank?action=list
+GET /api/question-bank?action=random
+GET /api/question-bank?action=detail&id=xxx
+POST /api/question-bank
+DELETE /api/question-bank?id=xxx
+```
 
-### GET /api/knowledge/search?q=xxx
-语义搜索知识库，返回相关文本片段
+### 知识库
 
-### GET /api/knowledge/documents
-获取已存储文档列表
-
-### DELETE /api/knowledge/documents?id=xxx
-删除指定文档及其所有向量数据
-
-## 模型配置
-
-支持在 `/settings` 页面配置各 Agent 使用不同模型：
-
-| 模型 | 说明 |
-|------|------|
-| Doubao Pro | 旗舰模型，复杂推理 |
-| Doubao Lite | 平衡性能与成本 |
-| Doubao Seed | 多模态 Agent 优化 |
-| DeepSeek V3.2 | 高级推理 |
-| DeepSeek R1 | 研究和分析 |
-| Kimi K2 | 长上下文 |
-| Kimi K2.5 | Agent、代码、视觉 |
-
-配置参数：`model`（模型 ID）、`temperature`（0-1）、`thinking`（是否开启思考模式）
-
-## 技术栈
-
-| 类别 | 技术 |
-|------|------|
-| 框架 | Next.js 16 (App Router) |
-| 核心 | React 19, TypeScript 5 |
-| UI | shadcn/ui (Radix UI) |
-| 样式 | Tailwind CSS 4 |
-| AI SDK | coze-coding-dev-sdk（LLM）+ DashScope Embedding（内建知识库） |
-| 状态管理 | Zustand（持久化） |
-| 多人隔离 | 匿名用户 Cookie + 用户级本地持久化 |
-| 表单 | React Hook Form + Zod |
-| 图标 | Lucide React |
-| 包管理 | pnpm 9+ |
-
-## 开发规范
-
-- **包管理**：仅使用 pnpm
-- **主题**：深色模式，teal 色调
-- **流式输出**：后端 ReadableStream + SSE，前端 fetch + Reader
-- **类型安全**：严格 TypeScript 检查
-- **路径别名**：使用 `@/` 导入（已配置）
+```http
+POST /api/knowledge/import
+GET /api/knowledge/search?q=SQL注入
+GET /api/knowledge/documents
+GET /api/knowledge/stats
+DELETE /api/knowledge/documents?id=xxx
+```
 
 ## 常用命令
 
 ```bash
 # 开发
-pnpm dev              # 启动开发服务器 (端口 10929)
-pnpm build            # 构建生产版本
-pnpm start            # 启动生产服务器
+pnpm dev
 
-# 检查
-pnpm ts-check         # TypeScript 类型检查
-pnpm lint             # ESLint 检查
+# 类型检查
+pnpm ts-check
+
+# ESLint
+pnpm lint
+
+# 生产构建
+pnpm build
+
+# 生产启动
+pnpm start
 ```
+
+常用回归脚本：
+
+```bash
+pnpm exec tsx scripts/question-bank-user-continuity.test.ts
+pnpm exec tsx scripts/learning-report-dynamic-fallback.test.ts
+pnpm exec tsx scripts/assessment-report-content.test.ts
+pnpm exec tsx scripts/learning-report-normalized-types.test.ts
+pnpm exec tsx scripts/explainer-learning-path-config.test.ts
+```
+
+## Git 提交注意事项
+
+以下内容不应提交：
+
+- `.env.local`
+- `node_modules/`
+- `.next/`
+- `dist/`
+- `tmp/`
+- `output/`
+- `data/knowledge/*.db-wal`
+- `data/knowledge/*.db-shm`
+
+本仓库当前允许提交：
+
+- `data/knowledge/knowledge.db`
+
+如果你不希望公开题库和答题历史，请先净化数据库后再推送。
+
+## Windows Server 部署
+
+Windows Server 2019 部署说明见：
+
+- [`WINDOWS_SERVER_DEPLOY.md`](./WINDOWS_SERVER_DEPLOY.md)
+
+## License
+
+当前项目未声明开源协议。公开仓库如需他人使用、分发或二次开发，建议补充 `LICENSE` 文件。
