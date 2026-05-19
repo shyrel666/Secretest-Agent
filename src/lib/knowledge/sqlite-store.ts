@@ -12,6 +12,8 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import path from 'path';
 import fs from 'fs';
+import { buildFtsQuery } from './chinese-tokenizer';
+import { getRetrievalConfig, resolveSqlFetchLimit } from './retrieval-config';
 
 // ——— 类型定义 ———
 
@@ -279,6 +281,77 @@ export function deleteDocument(
 
 // ——— 搜索操作 ———
 
+function buildDocTypeFilterClause(typeFilter?: string[]): {
+  sql: string;
+  params: string[];
+} {
+  if (!typeFilter || typeFilter.length === 0) {
+    return { sql: '', params: [] };
+  }
+
+  const placeholders = typeFilter.map(() => '?').join(',');
+  return {
+    sql: `AND d.type IN (${placeholders})`,
+    params: [...typeFilter],
+  };
+}
+
+function resolveFetchLimit(topK: number, typeFilter?: string[]): number {
+  return resolveSqlFetchLimit(topK, typeFilter);
+}
+
+function mapVectorRows(
+  chunkRows: Array<{
+    id: string;
+    doc_id: string;
+    content: string;
+    section_path: string;
+    clause_number: string;
+    chunk_type: string;
+  }>,
+  distanceMap: Map<string, number>,
+): SearchResult[] {
+  return chunkRows.map((row) => {
+    const distance = distanceMap.get(row.id) ?? 1;
+    return {
+      content: row.content,
+      score: 1 - distance,
+      docId: row.doc_id,
+      sectionPath: row.section_path,
+      clauseNumber: row.clause_number,
+      chunkType: row.chunk_type,
+      chunkId: row.id,
+    };
+  });
+}
+
+function loadVectorChunkRows(
+  db: Database.Database,
+  chunkIds: string[],
+  typeFilter?: string[],
+) {
+  if (chunkIds.length === 0) return [];
+
+  const typeFilterClause = buildDocTypeFilterClause(typeFilter);
+  const placeholders = chunkIds.map(() => '?').join(',');
+
+  return db.prepare(`
+    SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type,
+           d.type as doc_type
+    FROM chunks c
+    JOIN documents d ON c.doc_id = d.id
+    WHERE c.id IN (${placeholders})
+    ${typeFilterClause.sql}
+  `).all(...chunkIds, ...typeFilterClause.params) as Array<{
+    id: string;
+    doc_id: string;
+    content: string;
+    section_path: string;
+    clause_number: string;
+    chunk_type: string;
+  }>;
+}
+
 /**
  * 向量语义搜索 — 使用 sqlite-vec 近似最近邻
  */
@@ -290,64 +363,37 @@ export function searchByVector(
 ): SearchResult[] {
   const db = getDb();
   const queryBuf = vecToBuffer(queryEmbedding);
+  const { maxSqlFetchLimit } = getRetrievalConfig();
 
-  // sqlite-vec KNN 搜索
-  // distance_metric=cosine 时，distance = 1 - cosine_similarity
-  const vecResults = db.prepare(`
-    SELECT chunk_id, distance
-    FROM vec_chunks
-    WHERE embedding MATCH ?
-    ORDER BY distance
-    LIMIT ?
-  `).all(queryBuf, topK * 3) as Array<{ chunk_id: string; distance: number }>;
+  let fetchLimit = resolveFetchLimit(topK, typeFilter);
 
-  if (vecResults.length === 0) return [];
+  while (true) {
+    const vecResults = db.prepare(`
+      SELECT chunk_id, distance
+      FROM vec_chunks
+      WHERE embedding MATCH ?
+      ORDER BY distance
+      LIMIT ?
+    `).all(queryBuf, fetchLimit) as Array<{ chunk_id: string; distance: number }>;
 
-  // 加载对应的 chunk 详情
-  const chunkIds = vecResults.map((r) => r.chunk_id);
-  const distanceMap = new Map(vecResults.map((r) => [r.chunk_id, r.distance]));
+    if (vecResults.length === 0) return [];
 
-  const placeholders = chunkIds.map(() => '?').join(',');
-  const chunkRows = db.prepare(`
-    SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type,
-           d.type as doc_type
-    FROM chunks c
-    JOIN documents d ON c.doc_id = d.id
-    WHERE c.id IN (${placeholders})
-  `).all(...chunkIds) as Array<{
-    id: string;
-    doc_id: string;
-    content: string;
-    section_path: string;
-    clause_number: string;
-    chunk_type: string;
-    doc_type: string;
-  }>;
+    const chunkIds = vecResults.map((r) => r.chunk_id);
+    const distanceMap = new Map(vecResults.map((r) => [r.chunk_id, r.distance]));
+    const chunkRows = loadVectorChunkRows(db, chunkIds, typeFilter);
+    const results = mapVectorRows(chunkRows, distanceMap)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
 
-  // 组装搜索结果，应用类型过滤
-  const results: SearchResult[] = [];
-  for (const row of chunkRows) {
-    if (typeFilter && typeFilter.length > 0 && !typeFilter.includes(row.doc_type)) {
-      continue;
+    const needsMore = typeFilter?.length && results.length < topK;
+    const canGrow = fetchLimit < maxSqlFetchLimit && vecResults.length === fetchLimit;
+
+    if (!needsMore || !canGrow) {
+      return results;
     }
 
-    const distance = distanceMap.get(row.id) ?? 1;
-    const score = 1 - distance; // cosine similarity
-
-    results.push({
-      content: row.content,
-      score,
-      docId: row.doc_id,
-      sectionPath: row.section_path,
-      clauseNumber: row.clause_number,
-      chunkType: row.chunk_type,
-      chunkId: row.id,
-    });
+    fetchLimit = Math.min(fetchLimit * 2, maxSqlFetchLimit);
   }
-
-  return results
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
 }
 
 /**
@@ -361,82 +407,81 @@ export function searchByKeyword(
 ): SearchResult[] {
   const db = getDb();
 
-  // 对查询做简单分词处理：保留中文和英文词
-  const terms = query
-    .replace(/[^\w\u4e00-\u9fff]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter((t) => t.length > 0);
+  const ftsQuery = buildFtsQuery(query);
+  if (!ftsQuery) return [];
 
-  if (terms.length === 0) return [];
-
-  // FTS5 查询：用 OR 连接词项
-  const ftsQuery = terms.map((t) => `"${t}"`).join(' OR ');
+  const { maxSqlFetchLimit } = getRetrievalConfig();
+  const typeFilterClause = buildDocTypeFilterClause(typeFilter);
+  let fetchLimit = resolveFetchLimit(topK, typeFilter);
 
   try {
-    const ftsResults = db.prepare(`
-      SELECT chunk_id, doc_id, snippet(chunks_fts, 0, '', '', '...', 64) as snippet,
-             bm25(chunks_fts) as rank
-      FROM chunks_fts
-      WHERE chunks_fts MATCH ?
-      ORDER BY rank
-      LIMIT ?
-    `).all(ftsQuery, topK * 3) as Array<{
-      chunk_id: string;
-      doc_id: string;
-      snippet: string;
-      rank: number;
-    }>;
+    while (true) {
+      const ftsResults = db.prepare(`
+        SELECT chunk_id, doc_id, snippet(chunks_fts, 0, '', '', '...', 64) as snippet,
+               bm25(chunks_fts) as rank
+        FROM chunks_fts
+        WHERE chunks_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(ftsQuery, fetchLimit) as Array<{
+        chunk_id: string;
+        doc_id: string;
+        snippet: string;
+        rank: number;
+      }>;
 
-    if (ftsResults.length === 0) return [];
+      if (ftsResults.length === 0) return [];
 
-    // 加载 chunk 详情
-    const chunkIds = ftsResults.map((r) => r.chunk_id);
-    const rankMap = new Map(ftsResults.map((r) => [r.chunk_id, r.rank]));
+      const chunkIds = ftsResults.map((r) => r.chunk_id);
+      const rankMap = new Map(ftsResults.map((r) => [r.chunk_id, r.rank]));
+      const placeholders = chunkIds.map(() => '?').join(',');
+      const chunkRows = db.prepare(`
+        SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type,
+               d.type as doc_type
+        FROM chunks c
+        JOIN documents d ON c.doc_id = d.id
+        WHERE c.id IN (${placeholders})
+        ${typeFilterClause.sql}
+      `).all(...chunkIds, ...typeFilterClause.params) as Array<{
+        id: string;
+        doc_id: string;
+        content: string;
+        section_path: string;
+        clause_number: string;
+        chunk_type: string;
+        doc_type: string;
+      }>;
 
-    const placeholders = chunkIds.map(() => '?').join(',');
-    const chunkRows = db.prepare(`
-      SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type,
-             d.type as doc_type
-      FROM chunks c
-      JOIN documents d ON c.doc_id = d.id
-      WHERE c.id IN (${placeholders})
-    `).all(...chunkIds) as Array<{
-      id: string;
-      doc_id: string;
-      content: string;
-      section_path: string;
-      clause_number: string;
-      chunk_type: string;
-      doc_type: string;
-    }>;
+      const results: SearchResult[] = [];
+      for (const row of chunkRows) {
+        const rawRank = rankMap.get(row.id) ?? 0;
+        const score = Math.min(1, Math.max(0, -rawRank / 10));
 
-    const results: SearchResult[] = [];
-    for (const row of chunkRows) {
-      if (typeFilter && typeFilter.length > 0 && !typeFilter.includes(row.doc_type)) {
-        continue;
+        results.push({
+          content: row.content,
+          score,
+          docId: row.doc_id,
+          sectionPath: row.section_path,
+          clauseNumber: row.clause_number,
+          chunkType: row.chunk_type,
+          chunkId: row.id,
+        });
       }
 
-      // BM25 分数是负数，越小越好；归一化到 0-1
-      const rawRank = rankMap.get(row.id) ?? 0;
-      const score = Math.min(1, Math.max(0, -rawRank / 10));
+      const ranked = results
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
 
-      results.push({
-        content: row.content,
-        score,
-        docId: row.doc_id,
-        sectionPath: row.section_path,
-        clauseNumber: row.clause_number,
-        chunkType: row.chunk_type,
-        chunkId: row.id,
-      });
+      const needsMore = typeFilter?.length && ranked.length < topK;
+      const canGrow = fetchLimit < maxSqlFetchLimit && ftsResults.length === fetchLimit;
+
+      if (!needsMore || !canGrow) {
+        return ranked;
+      }
+
+      fetchLimit = Math.min(fetchLimit * 2, maxSqlFetchLimit);
     }
-
-    return results
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
   } catch {
-    // FTS 查询语法错误时返回空
     return [];
   }
 }
@@ -921,12 +966,15 @@ export function getDocumentSections(
 export function getChunksByClausePrefix(
   _dataset: string,
   clausePrefix: string,
-  docType?: string,
+  docType?: string | string[],
 ): SearchResult[] {
   const db = getDb();
-
-  // LIKE 'prefix%' 匹配条款号前缀
   const likePattern = clausePrefix + '%';
+  const typeFilter = Array.isArray(docType)
+    ? docType
+    : docType
+      ? [docType]
+      : [];
 
   let chunkRows: Array<{
     id: string;
@@ -937,14 +985,15 @@ export function getChunksByClausePrefix(
     chunk_type: string;
   }>;
 
-  if (docType) {
+  if (typeFilter.length > 0) {
+    const placeholders = typeFilter.map(() => '?').join(',');
     chunkRows = db.prepare(`
       SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type
       FROM chunks c
       JOIN documents d ON c.doc_id = d.id
-      WHERE c.clause_number LIKE ? AND d.type = ?
+      WHERE c.clause_number LIKE ? AND d.type IN (${placeholders})
       ORDER BY c.sort_order
-    `).all(likePattern, docType) as typeof chunkRows;
+    `).all(likePattern, ...typeFilter) as typeof chunkRows;
   } else {
     chunkRows = db.prepare(`
       SELECT c.id, c.doc_id, c.content, c.section_path, c.clause_number, c.chunk_type

@@ -21,9 +21,16 @@ import {
   type ChunkRecord,
   type DocumentSection,
 } from './sqlite-store';
-import { hybridSearch, type HybridSearchOptions } from './hybrid-search';
-
-// 默认数据集名称（与原 SDK 保持一致）
+import { hybridSearch, expandSearchContext } from './hybrid-search';
+import { expandQuery } from './query-expansion';
+import { buildEmbedCacheKey, getCachedEmbedding, setCachedEmbedding, clearEmbedCache } from './embed-cache';
+import { rerankResults } from './reranker';
+import {
+  getRetrievalConfig,
+  resolveCandidatePoolSize,
+  resolveMaxExpandedResults,
+} from './retrieval-config';
+// Default dataset name (kept for SDK compatibility)
 const DEFAULT_DATASET = 'vulnerability_audit_standards';
 const DOCUMENTS_CACHE_TTL_MS = 15_000;
 const SEARCH_CACHE_TTL_MS = 60_000;
@@ -65,6 +72,8 @@ export interface SearchResultItem {
   clauseNumber?: string;
   /** chunk 类型 */
   chunkType?: string;
+  /** Internal chunk ID for context expansion */
+  chunkId?: string;
 }
 
 export interface SearchResult {
@@ -77,6 +86,11 @@ export interface SearchResult {
     estimated: boolean;
   };
   error?: string;
+}
+
+export interface SearchOptions {
+  /** Skip in-memory search cache (for eval latency measurement). */
+  bypassCache?: boolean;
 }
 
 /**
@@ -131,6 +145,41 @@ function cloneSearchResult(result: SearchResult, fromCache: boolean): SearchResu
 export function invalidateKnowledgeCaches(): void {
   documentsCache.clear();
   searchCache.clear();
+  clearEmbedCache();
+}
+
+async function getQueryEmbedding(
+  query: string,
+  config: KnowledgeConfig,
+): Promise<{ embedding: number[]; usage: { promptTokens: number; totalTokens: number }; fromCache: boolean }> {
+  const cacheKey = buildEmbedCacheKey(query, config.modelBaseUrl, config.embeddingModel);
+  const cached = getCachedEmbedding(cacheKey);
+
+  if (cached) {
+    return {
+      embedding: cached,
+      usage: { promptTokens: 0, totalTokens: 0 },
+      fromCache: true,
+    };
+  }
+
+  const embeddingResult = await embedTextsWithUsage([query], {
+    apiKey: config.apiKey,
+    modelBaseUrl: config.modelBaseUrl,
+    embeddingModel: config.embeddingModel,
+  });
+
+  const embedding = embeddingResult.embeddings[0];
+  setCachedEmbedding(cacheKey, embedding);
+
+  return {
+    embedding,
+    usage: {
+      promptTokens: embeddingResult.usage.promptTokens,
+      totalTokens: embeddingResult.usage.totalTokens,
+    },
+    fromCache: false,
+  };
 }
 
 /**
@@ -217,9 +266,10 @@ export async function search(
   query: string,
   config: KnowledgeConfig,
   topK: number = 5,
-  threshold: number = 0.25,
+  threshold: number = getRetrievalConfig().defaultSearchThreshold,
   dataset?: string,
   typeFilter?: string[],
+  options?: SearchOptions,
 ): Promise<SearchResult> {
   try {
     if (!config.apiKey || !config.modelBaseUrl) {
@@ -230,8 +280,11 @@ export async function search(
       };
     }
 
+    const expandedQuery = expandQuery(query);
+
+    const bypassCache = options?.bypassCache === true;
     const cacheKey = buildSearchCacheKey({
-      query,
+      query: expandedQuery,
       config,
       topK,
       threshold,
@@ -239,7 +292,7 @@ export async function search(
       typeFilter,
     });
     const now = Date.now();
-    const cached = searchCache.get(cacheKey);
+    const cached = bypassCache ? undefined : searchCache.get(cacheKey);
 
     if (cached?.value && cached.expiresAt > now) {
       return cloneSearchResult(cached.value, true);
@@ -251,67 +304,109 @@ export async function search(
     }
 
     const pending = (async (): Promise<SearchResult> => {
-      // 1. 获取查询文本的 embedding
-      const embeddingResult = await embedTextsWithUsage([query], {
-        apiKey: config.apiKey,
-        modelBaseUrl: config.modelBaseUrl,
-        embeddingModel: config.embeddingModel,
-      });
-      const queryEmbedding = embeddingResult.embeddings[0];
-
-      // 2. 混合检索（向量 + 关键词 + 条款号融合）
-      const searchOptions: HybridSearchOptions = {
-        topK,
-        threshold,
-        typeFilter,
-        alpha: 0.7,
-        expandContext: true,
-        contextWindowSize: 1,
-      };
-
-      const rawResults = hybridSearch(
-        queryEmbedding,
-        query,
-        dataset || DEFAULT_DATASET,
-        searchOptions,
+      // 1. Query embedding (LRU cache)
+      const { embedding: queryEmbedding, usage: embedUsage } = await getQueryEmbedding(
+        expandedQuery,
+        config,
       );
 
-      // 3. 转换为外部接口格式
-      const results: SearchResultItem[] = rawResults.map((r) => ({
+      const retrievalCfg = getRetrievalConfig();
+      const poolK = resolveCandidatePoolSize(topK);
+
+      // 2. Hybrid retrieval (RRF fusion; context expansion done after rerank)
+      const rawResults = hybridSearch(
+        queryEmbedding,
+        expandedQuery,
+        dataset || DEFAULT_DATASET,
+        {
+          resultTopK: poolK,
+          threshold,
+          typeFilter,
+          expandContext: false,
+          candidateK: poolK,
+        },
+      );
+
+      const candidates: SearchResultItem[] = rawResults.map((r) => ({
         content: r.content,
         score: r.score,
         docId: r.docId,
         sectionPath: r.sectionPath,
         clauseNumber: r.clauseNumber,
         chunkType: r.chunkType,
+        chunkId: r.chunkId,
+      }));
+
+      // 3. Optional rerank (disabled by default — see retrieval-config)
+      const reranked = await rerankResults(
+        expandedQuery,
+        queryEmbedding,
+        candidates,
+        config,
+        topK,
+      );
+
+      // 4. Context window expansion (capped)
+      const maxExpanded = resolveMaxExpandedResults(topK);
+      const rerankedWithIds = reranked.results.filter((r) => r.chunkId);
+      const withContext = rerankedWithIds.length > 0
+        ? expandSearchContext(
+          rerankedWithIds.map((r) => ({
+            content: r.content,
+            score: r.score,
+            docId: r.docId,
+            sectionPath: r.sectionPath || '',
+            clauseNumber: r.clauseNumber || '',
+            chunkType: r.chunkType || 'general',
+            chunkId: r.chunkId!,
+          })),
+          retrievalCfg.contextWindowSize,
+          maxExpanded,
+        )
+        : reranked.results.slice(0, maxExpanded);
+
+      const results: SearchResultItem[] = withContext.map((r) => ({
+        content: r.content,
+        score: r.score,
+        docId: r.docId,
+        sectionPath: r.sectionPath,
+        clauseNumber: r.clauseNumber,
+        chunkType: r.chunkType,
+        chunkId: r.chunkId,
       }));
 
       return {
         success: true,
         results,
         usage: {
-          promptTokens: embeddingResult.usage.promptTokens,
+          promptTokens: embedUsage.promptTokens + reranked.usage.promptTokens,
           completionTokens: 0,
-          totalTokens: embeddingResult.usage.totalTokens,
+          totalTokens: embedUsage.totalTokens + reranked.usage.totalTokens,
           estimated: false,
         },
       };
     })();
 
-    searchCache.set(cacheKey, {
-      expiresAt: now + SEARCH_CACHE_TTL_MS,
-      promise: pending,
-    });
+    if (!bypassCache) {
+      searchCache.set(cacheKey, {
+        expiresAt: now + SEARCH_CACHE_TTL_MS,
+        promise: pending,
+      });
+    }
 
     try {
       const result = await pending;
-      searchCache.set(cacheKey, {
-        expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
-        value: result,
-      });
+      if (!bypassCache) {
+        searchCache.set(cacheKey, {
+          expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+          value: result,
+        });
+      }
       return cloneSearchResult(result, false);
     } catch (error) {
-      searchCache.delete(cacheKey);
+      if (!bypassCache) {
+        searchCache.delete(cacheKey);
+      }
       throw error;
     }
   } catch (error) {

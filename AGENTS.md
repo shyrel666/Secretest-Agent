@@ -32,7 +32,7 @@
 - **Language**: TypeScript 5
 - **UI 组件**: shadcn/ui (基于 Radix UI)
 - **Styling**: Tailwind CSS 4
-- **AI SDK**: coze-coding-dev-sdk (LLM + Knowledge)
+- **AI SDK**: coze-coding-dev-sdk (LLM)；知识库为本地 SQLite + sqlite-vec + FTS5 混合检索
 
 ## 目录结构
 
@@ -130,11 +130,25 @@ Agent协调接口，支持多种action:
 - **Agent协作**: 通过Orchestrator协调多个Agent
 - **类型安全**: 严格的TypeScript类型检查
 
+## 知识库检索
+
+- **存储**: `data/knowledge/knowledge.db`（SQLite + sqlite-vec + FTS5）
+- **检索链路**: 查询扩展 → Embedding（LRU 缓存）→ RRF 混合检索（向量 + BM25 + 条款前缀）→ 分数截断（可选 rerank，默认关闭）→ 上下文扩展（有上限）
+- **配置**: `src/lib/knowledge/retrieval-config.ts`（`setRetrievalConfig` 可运行时覆盖）
+- **单测**: `pnpm test:knowledge`
+- **评测**: `pnpm eval:retrieval`（需配置 API Key，golden set 见 `src/lib/knowledge/eval/golden-queries.json`）
+
 ## 测试命令
 
 ```bash
 # 类型检查
 npx tsc --noEmit
+
+# 检索模块单测
+pnpm test:knowledge
+
+# 检索质量评测（Recall@5 / MRR）
+pnpm eval:retrieval
 
 # 服务检测
 curl -I http://localhost:10929
