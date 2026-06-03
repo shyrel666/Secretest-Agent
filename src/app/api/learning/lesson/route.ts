@@ -347,6 +347,7 @@ function createLiveLessonEventStream(params: {
           send({
             type: 'metadata',
             ...payload,
+            qualityWarnings: chunk.qualityWarnings,
             fromCache: false,
           });
         }

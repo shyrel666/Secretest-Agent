@@ -6,7 +6,7 @@ import { useParams } from 'next/navigation';
 import type { TokenUsage } from '@/lib/token-usage';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, ChevronDown, Loader2, Sparkles, Target } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ArrowRight, BookOpen, CheckCircle2, ChevronDown, Loader2, Sparkles, Target } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -30,6 +30,7 @@ interface LessonStreamPayload {
   references?: string[];
   usage?: TokenUsage | null;
   content?: string;
+  qualityWarnings?: string[];
 }
 
 interface LessonStageState {
@@ -110,6 +111,7 @@ export default function LearningTopicPage() {
   const [error, setError] = useState('');
   const [, setLessonUsage] = useState<TokenUsage | null>(null);
   const [lessonStage, setLessonStage] = useState<LessonStageState | null>(null);
+  const [lessonQualityWarnings, setLessonQualityWarnings] = useState<string[]>([]);
 
   const { getAgentConfig, getConnectionConfig } = useAIConfigStore();
   const topicProgress = useLearningProgressStore((state) => (topicId ? state.topics[topicId] : undefined));
@@ -230,6 +232,7 @@ export default function LearningTopicPage() {
       setLessonDocument(null);
       setReferences([]);
       setLessonUsage(null);
+      setLessonQualityWarnings([]);
       setLessonStage({
         label: '准备生成',
         detail: '正在连接知识库并准备章节导学…',
@@ -280,6 +283,11 @@ export default function LearningTopicPage() {
           setLessonDocument(nextLessonDocument);
           setReferences(Array.isArray(payload.references) ? payload.references : []);
           setLessonUsage(payload.usage || null);
+          setLessonQualityWarnings(
+            Array.isArray(payload.qualityWarnings)
+              ? payload.qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
+              : [],
+          );
 
           if (nextLessonDocument) {
             cacheLesson(topic.id, nextLessonDocument);
@@ -474,6 +482,19 @@ export default function LearningTopicPage() {
                 </div>
               ) : (
                 <article className="mx-auto max-w-5xl xl:px-4">
+                  {lessonQualityWarnings.length > 0 && (
+                    <div className="mb-6 space-y-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-5 py-4">
+                      <div className="flex items-center gap-2 text-sm font-medium text-amber-100">
+                        <AlertTriangle className="h-4 w-4 shrink-0" />
+                        章节内容质量提示
+                      </div>
+                      {lessonQualityWarnings.map((warning) => (
+                        <p key={warning} className="text-sm leading-7 text-amber-100/85">
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                   {isLoadingLesson && lessonStage && (
                     <div className="mb-6 rounded-2xl border border-primary/20 bg-primary/5 px-5 py-4">
                       <div className="mb-3 flex items-center gap-2 text-sm font-medium text-foreground">
@@ -685,6 +706,9 @@ async function readSseStream(
             ? payload.references.filter((reference): reference is string => typeof reference === 'string')
             : undefined,
           usage: isTokenUsagePayload(payload.usage) ? payload.usage : undefined,
+          qualityWarnings: Array.isArray(payload.qualityWarnings)
+            ? payload.qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
+            : undefined,
         });
       } else if (payload.type === 'result') {
         handlers.onResult({
@@ -697,6 +721,9 @@ async function readSseStream(
             ? payload.references.filter((reference): reference is string => typeof reference === 'string')
             : undefined,
           usage: isTokenUsagePayload(payload.usage) ? payload.usage : undefined,
+          qualityWarnings: Array.isArray(payload.qualityWarnings)
+            ? payload.qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
+            : undefined,
         });
       } else if (payload.type === 'error') {
         handlers.onError(typeof payload.error === 'string' ? payload.error : '章节内容加载失败');
