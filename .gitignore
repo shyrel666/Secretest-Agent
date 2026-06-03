@@ -59,6 +59,8 @@ node-compile-cache/
 !.vscode/extensions.json
 !.vscode/settings.json
 .idea/
+.claude/
+.cursor/
 *.suo
 *.ntvs*
 *.njsproj
