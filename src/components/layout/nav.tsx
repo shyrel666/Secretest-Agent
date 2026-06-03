@@ -50,7 +50,7 @@ export function Nav() {
       <div className="relative px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto flex items-center justify-between h-16">
           {/* Logo */}
-          <Link href="/" className="flex items-center gap-3 group">
+          <Link href="/" prefetch={true} className="flex items-center gap-3 group">
             <BrandLogo
               size={38}
               className="transition-transform group-hover:scale-105"

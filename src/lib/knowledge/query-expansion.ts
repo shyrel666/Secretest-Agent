@@ -28,7 +28,8 @@ export function expandQuery(query: string): string {
     if (query.includes(key) || synonyms.some((s) => queryLower.includes(s.toLowerCase()))) {
       const extras = synonyms
         .filter((s) => !queryLower.includes(s.toLowerCase()))
-        .slice(0, 2);
+        .slice(0, 2)
+        .map((s) => (s.includes(' ') ? `"${s}"` : s));  // 多词加引号保护
       additions.push(...extras);
     }
   }

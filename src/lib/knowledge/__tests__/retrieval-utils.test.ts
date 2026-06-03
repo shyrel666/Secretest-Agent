@@ -53,6 +53,22 @@ describe('chinese-tokenizer', () => {
     const q = buildFtsQuery('跨站脚本');
     assert.ok(q?.includes(' OR '));
   });
+
+  it('preserves quoted multi-word segments as fts phrases', () => {
+    const q = buildFtsQuery('SQL注入 "SQL injection"');
+    // 多词短语应作为一个 FTS5 短语 token 保留，而不是拆成 sql / injection
+    assert.ok(q?.includes('"SQL injection"'), q ?? 'null');
+  });
+
+  it('does not phrase-wrap single-word quoted segments', () => {
+    const q = buildFtsQuery('"PreparedStatement"');
+    // 单词被去引号后交给普通分词器，最终仍是小写单词 token
+    assert.ok(q?.includes('"preparedstatement"'), q ?? 'null');
+  });
+
+  it('returns null for empty query', () => {
+    assert.equal(buildFtsQuery('   '), null);
+  });
 });
 
 describe('expandQuery', () => {

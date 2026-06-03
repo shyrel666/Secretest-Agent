@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat ~/.claude/plugins/superpowers/.claude-plugin/plugin.json 2>/dev/null)",
+      "Read(//c/Users/info/.claude/plugins/superpowers/.claude-plugin/**)"
+    ]
+  }
+}

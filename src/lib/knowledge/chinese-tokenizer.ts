@@ -78,10 +78,28 @@ export function tokenizeQuery(query: string): string[] {
 
 /**
  * Build an FTS5 MATCH expression from a query string.
+ *
+ * Double-quoted multi-word segments (e.g. `"sql injection"`, produced by
+ * query expansion) are preserved as FTS5 phrase tokens so they match
+ * consecutive terms instead of being split into independent OR clauses.
  */
 export function buildFtsQuery(query: string): string | null {
-  const terms = tokenizeQuery(query);
-  if (terms.length === 0) return null;
+  const phrases: string[] = [];
 
-  return terms.map((t) => `"${escapeFtsTerm(t)}"`).join(' OR ');
+  // Pull out "quoted phrases" first; only multi-word segments become phrases.
+  const remainder = query.replace(/"([^"]+)"/g, (_, inner: string) => {
+    const trimmed = inner.trim();
+    if (trimmed.includes(' ')) {
+      phrases.push(`"${escapeFtsTerm(trimmed)}"`);
+      return ' ';
+    }
+    // Single-word quoted segment: let the normal tokenizer handle it.
+    return ` ${trimmed} `;
+  });
+
+  const terms = tokenizeQuery(remainder).map((t) => `"${escapeFtsTerm(t)}"`);
+  const all = [...phrases, ...terms];
+  if (all.length === 0) return null;
+
+  return all.join(' OR ');
 }

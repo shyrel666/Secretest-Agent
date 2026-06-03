@@ -455,7 +455,8 @@ export function searchByKeyword(
       const results: SearchResult[] = [];
       for (const row of chunkRows) {
         const rawRank = rankMap.get(row.id) ?? 0;
-        const score = Math.min(1, Math.max(0, -rawRank / 10));
+        // FTS5 bm25() 返回负值，越相关越负；取负后映射到 [0,1)
+        const score = rawRank < 0 ? 1 - 1 / (1 + Math.abs(rawRank)) : 0;
 
         results.push({
           content: row.content,

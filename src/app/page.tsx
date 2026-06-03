@@ -18,7 +18,7 @@ import {
 import { STANDARD_INFO, type StandardType } from '@/lib/standards';
 import { getDocumentSections } from '@/lib/knowledge';
 
-export const dynamic = 'force-dynamic';
+export const revalidate = 3600;
 
 const features = [
   {
@@ -134,7 +134,7 @@ export default function Home() {
             </div>
 
             <div className="flex flex-col sm:flex-row sm:flex-wrap items-center justify-center gap-4 pt-4">
-              <Link href="/knowledge">
+              <Link href="/knowledge" prefetch={true}>
                 <Button size="lg" className="gap-2 px-8">
                   上传标准文档
                   <ArrowRight className="w-4 h-4" />
@@ -309,7 +309,7 @@ export default function Home() {
                 上传国标文档，让AI帮你构建专属的代码漏洞审计学习系统
               </p>
               <div className="flex items-center justify-center">
-                <Link href="/knowledge">
+                <Link href="/knowledge" prefetch={true}>
                   <Button size="lg" className="gap-2">
                     <Database className="w-4 h-4" />
                     上传标准文档

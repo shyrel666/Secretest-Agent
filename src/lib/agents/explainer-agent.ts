@@ -43,32 +43,57 @@ const EXPLAINER_PROMPT = `你是一位耐心细致的代码安全审计导师，
 
 const LEARNING_LESSON_PROMPT = `你是一位面向零基础学习者的代码漏洞审计导师。
 
-你的任务是：
-1. 严格基于当前提供的内部知识库片段，生成一份“新手闯关课”章节导学
+## 你的任务
+
+1. 严格基于当前提供的内部知识库片段，生成一份"新手闯关课"章节导学
 2. 用大白话讲清楚概念，不假设用户已经懂安全术语
 3. 把国标条款里的抽象要求翻译成具体的审计观察点
 4. 如果知识片段中包含原始示例代码，你只能提炼原理并重构成自己的说明，不能直接照搬大段原文或原始示例
 
-输出要求：
-- 必须只输出一个 JSON 对象，不要输出任何额外说明、前后缀、Markdown 代码块或注释
-- JSON 结构必须严格如下：
-  {
-    "contentMarkdown": "这里放第 1-5 节的 Markdown 正文",
-    "practiceQuestions": [
-      {
-        "questionMarkdown": "题目 1 的题面",
-        "answerMarkdown": "题目 1 的参考答案"
-      }
-    ]
-  }
-- contentMarkdown 只能包含以下 5 个小节（用纯数字编号作为标题，不要加 ## 或 ### 前缀）：
-  1. 本章你会学到什么
-  2. 先建立直觉
-  3. 漏洞是怎么形成的
-  4. 审计时先看什么
-  5. 一个贴近业务的小例子 —— 必须包含两段完整的代码：一段"有漏洞的写法"和一段"修复后的写法"，用 Markdown 代码块（带语言标记）呈现，并在代码前后用文字说明业务场景和关键改动点
-- 不要把“6. 学完后立刻自测”写进 contentMarkdown
-- practiceQuestions 必须刚好有 3 道题，每道题都只包含题面和参考答案，不要输出 HTML <details>、<summary> 或其他 HTML 标签
+## 输出格式（严格遵守）
+
+只输出一个 JSON 对象，不要输出任何额外说明、前后缀、Markdown 代码块包裹或注释。
+
+JSON 结构：
+{
+  "contentMarkdown": "（见下方格式要求）",
+  "practiceQuestions": [
+    { "questionMarkdown": "题面", "answerMarkdown": "参考答案" },
+    { "questionMarkdown": "题面", "answerMarkdown": "参考答案" },
+    { "questionMarkdown": "题面", "answerMarkdown": "参考答案" }
+  ]
+}
+
+### contentMarkdown 格式要求
+
+contentMarkdown 必须且只能包含以下 5 个小节。标题格式为「纯数字 + 英文句号 + 空格 + 标题文字」，标题行前后不要加 #、##、### 等任何 Markdown 标题标记。
+
+示例结构（标题文字必须与下面完全一致，不要改写或添加标点）：
+
+1. 本章你会学到什么
+（正文内容）
+
+2. 先建立直觉
+（正文内容）
+
+3. 漏洞是怎么形成的
+（正文内容）
+
+4. 审计时先看什么
+（正文内容）
+
+5. 一个贴近业务的小例子
+（正文内容：必须包含两段完整的代码——一段"有漏洞的写法"和一段"修复后的写法"，用 Markdown 代码块并带语言标记，代码前后用文字说明业务场景和关键改动点）
+
+### practiceQuestions 格式要求
+
+- 必须恰好 3 道题
+- 每道题只包含 questionMarkdown（题面）和 answerMarkdown（参考答案）
+- 不要使用 HTML 标签（如 <details>、<summary> 等）
+- 不要把"学完后立刻自测"相关内容写进 contentMarkdown
+
+## 内容质量要求
+
 - 语言要口语化，但标准引用必须准确
 - 如果知识库片段不足以支持某个结论，就明确说"当前上传文档未覆盖这部分细节"`;
 
@@ -864,9 +889,7 @@ ${knowledgeContext}
 - 只使用上面的知识库片段
 - 用适合零基础用户的语言解释
 - 审计检查点尽量落成可执行清单
-- 小例子允许改写，但不能照搬知识库原始示例代码
- - practiceQuestions 必须输出 3 道自测题，帮助用户判断自己是否学会
- - 参考答案只写在 answerMarkdown 中，不要输出 HTML 标签`);
+- 小例子允许改写，但不能照搬知识库原始示例代码`);
 
       const response = await this.invokeStructuredLearningLesson(messages);
       const groundingText = serializeLessonDocument(response.lessonDocument);
@@ -976,9 +999,7 @@ ${knowledgeContext}
 - 只使用上面的知识库片段
 - 用适合零基础用户的语言解释
 - 审计检查点尽量落成可执行清单
-- 小例子允许改写，但不能照搬知识库原始示例代码
- - practiceQuestions 必须输出 3 道自测题，帮助用户判断自己是否学会
- - 参考答案只写在 answerMarkdown 中，不要输出 HTML 标签`);
+- 小例子允许改写，但不能照搬知识库原始示例代码`);
 
       yield {
         type: 'stage',
@@ -1128,9 +1149,7 @@ ${knowledgeContext}
 - 每个子条款的核心内容都要覆盖到
 - 用适合零基础用户的语言解释
 - 审计检查点尽量落成可执行清单
-- 小例子允许改写，但不能照搬知识库原始示例代码
- - practiceQuestions 必须输出 3 道自测题
- - 参考答案只写在 answerMarkdown 中，不要输出 HTML 标签`);
+- 小例子允许改写，但不能照搬知识库原始示例代码`);
 
       const response = await this.invokeStructuredLearningLesson(messages);
       const groundingText = serializeLessonDocument(response.lessonDocument);
@@ -1226,9 +1245,7 @@ ${knowledgeContext}
 - 每个子条款的核心内容都要覆盖到
 - 用适合零基础用户的语言解释
 - 审计检查点尽量落成可执行清单
-- 小例子允许改写，但不能照搬知识库原始示例代码
- - practiceQuestions 必须输出 3 道自测题
- - 参考答案只写在 answerMarkdown 中，不要输出 HTML 标签`);
+- 小例子允许改写，但不能照搬知识库原始示例代码`);
 
       yield {
         type: 'stage',

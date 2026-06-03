@@ -43,14 +43,38 @@ Secretest Agent 是一个基于国标知识库和多 Agent 协作的代码安全
 
 ## 快速开始
 
-### 1. 克隆项目
+### 方式一：一键启动（推荐 Windows 用户）
+
+项目根目录提供了自动化脚本，**右键 → 以管理员身份运行** 即可，无需手动安装任何依赖：
+
+| 脚本 | 用途 |
+| --- | --- |
+| `一键启动.bat` | 自动检测管理员权限、安装 Node.js、VC++ 运行库、pnpm、项目依赖，检测端口冲突，构建并启动服务 |
+
+> 请务必以管理员身份运行脚本，否则自动安装 Node.js / VC++ 运行库等步骤可能失败。
+
+脚本的自动检测与安装能力：
+
+- **管理员权限检测**：非管理员运行时提示右键「以管理员身份运行」，可选择继续或退出
+- **Node.js**：优先通过 `winget` 安装，备用方案为动态获取最新 LTS 版本下载 msi 静默安装
+- **VC++ 运行库**：通过 `winget` 安装（`better-sqlite3` / `sqlite-vec` 依赖）
+- **pnpm**：通过 `npm install -g pnpm@9` 安装（锁定 v9 主版本）
+- **端口冲突检测**：自动读取 `.env.local` 中的 `PORT`，检测端口占用并提示占用进程
+- **项目依赖**：`pnpm install`
+- **构建**：`pnpm build`（首次自动执行，后续检测到构建产物则跳过）
+
+> 首次启动时，脚本会自动生成 `.env.local`，如需局域网访问可弹出编辑器设置 `HOSTNAME=0.0.0.0`。
+
+### 方式二：手动安装
+
+#### 1. 克隆项目
 
 ```bash
 git clone https://github.com/shyrel666/Secretest-Agent.git
 cd Secretest-Agent
 ```
 
-### 2. 安装依赖
+#### 2. 安装依赖
 
 本项目限定使用 `pnpm`。
 
@@ -58,7 +82,7 @@ cd Secretest-Agent
 pnpm install
 ```
 
-### 3. 配置环境变量
+#### 3. 配置环境变量
 
 复制环境变量模板：
 
@@ -83,13 +107,7 @@ QUESTION_BANK_SINGLE_USER_MODE=false
 
 ```
 
-可使用 OpenAI 兼容接口，例如：
-
-- 阿里百炼：`https://dashscope.aliyuncs.com/compatible-mode/v1`
-- 火山方舟：`https://ark.cn-beijing.volces.com/api/v3`
-- DeepSeek：`https://api.deepseek.com/v1`
-
-### 4. 启动开发服务
+#### 4. 启动开发服务
 
 ```bash
 pnpm dev
@@ -101,7 +119,7 @@ pnpm dev
 http://localhost:10929
 ```
 
-### 5. 构建和生产启动
+#### 5. 构建和生产启动
 
 ```bash
 pnpm build

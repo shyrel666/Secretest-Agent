@@ -200,10 +200,7 @@ export async function importText(
     }
 
     // 1. 结构感知分块
-    const structuredChunks: StructuredChunk[] = chunkText(content, {
-      maxChunkSize: 1200,
-      overlap: 80,
-    });
+    const structuredChunks: StructuredChunk[] = chunkText(content, { maxChunkSize: 1200, overlap: 80 });
     if (structuredChunks.length === 0) {
       return { success: false, error: '文本内容为空，无法分块' };
     }

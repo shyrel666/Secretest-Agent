@@ -64,6 +64,11 @@ const NOISE_PATTERNS: RegExp[] = [
   /^\s*GB\/T\s*\d{4,5}[—\-]\d{4}\s*$/gm,
   // 页眉中的 "犌犅／犜" 形式（已经过 CJK 修复后变成半角）
   /^\s*GB\/T\d{4,5}-\d{4}\s*$/gm,
+  // 目次/TOC 点引导符行：整行含连续点引导符（阈值取高以避开正文的「……」）
+  // ASCII 点 6+ / 省略号 4+ / 间隔点 4+
+  /^.*(?:\.{6,}|\u2026{4,}|·{4,}).*$/gm,
+  // 封底版权页 / 出版社页眉（关键词容忍被 PDF 拆开的字间空格）
+  /^.*(?:版\s*权\s*专\s*有|侵\s*权\s*必\s*究|中\s*国\s*标\s*准\s*出\s*版\s*社|出\s*版\s*发\s*行|书\s*号|定\s*价).*$/gm,
 ];
 
 function removeNoise(text: string): string {
@@ -98,8 +103,8 @@ function cleanWhitespace(text: string): string {
 function mergeBreakingLines(text: string): string {
   const lines = text.split('\n');
   const merged: string[] = [];
-  const SENTENCE_END = /[。！？；;!?.：:）)》」』\]]$/;
-  const HEADING_START = /^(\d+[\s.]|\[|附\s*录|表\s*[A-Z\d]|#|前\s*言|引\s*言|目\s*次|范\s*围|示例)/;
+  const SENTENCE_END = /[。！？；.!?;：:）)》」』\]、,]$/;
+  const HEADING_START = /^(\d+(?:\.\d+)*\s+|\[|附\s*录|表\s*[A-Z\d]|#|前\s*言|引\s*言|目\s*次|范\s*围|示例|注\s*[:：]|图\s*[A-Z\d])/;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -132,10 +137,13 @@ function mergeBreakingLines(text: string): string {
  * "3.  7" → "3.7"、"5.\t1.\t2" → "5.1.2"
  */
 function fixClauseNumbers(text: string): string {
-  // 修复条款编号中的多余空格/tab
+  // 仅匹配行首独立条款号，避免误合并正文中的数字
   return text.replace(
-    /(\d+)\.\s+(\d+)/g,
-    '$1.$2',
+    /(?:^|\n)\s*(\d+)\.\s{2,}(\d+(?:\.\s{0,2}\d+)*)/g,
+    (match, p1, p2) => {
+      const cleaned = p2.replace(/\.\s+/g, '.');
+      return match.startsWith('\n') ? `\n${p1}.${cleaned}` : `${p1}.${cleaned}`;
+    },
   );
 }
 

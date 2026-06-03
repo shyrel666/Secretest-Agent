@@ -1,40 +1,28 @@
 'use client';
 
-import type { CSSProperties, ElementType } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { useTheme } from 'next-themes';
+import dynamic from 'next/dynamic';
+import type { ThemedCodeBlockProps } from './themed-code-block.types';
 
-interface ThemedCodeBlockProps {
-  code: string;
-  language?: string;
-  customStyle?: CSSProperties;
-  codeTagStyle?: CSSProperties;
-  preTag?: ElementType;
-  showLineNumbers?: boolean;
-}
-
-export function ThemedCodeBlock({
-  code,
-  language = 'text',
-  customStyle,
-  codeTagStyle,
-  preTag = 'div',
-  showLineNumbers = false,
-}: ThemedCodeBlockProps) {
-  const { resolvedTheme } = useTheme();
-  const style = resolvedTheme === 'light' ? oneLight : oneDark;
-
-  return (
-    <SyntaxHighlighter
-      language={language}
-      style={style}
-      PreTag={preTag}
-      customStyle={customStyle}
-      codeTagProps={codeTagStyle ? { style: codeTagStyle } : undefined}
-      showLineNumbers={showLineNumbers}
-    >
-      {code}
-    </SyntaxHighlighter>
-  );
-}
+export const ThemedCodeBlock = dynamic<ThemedCodeBlockProps>(
+  () =>
+    import('./themed-code-block-impl').then((m) => ({
+      default: m.ThemedCodeBlockImpl,
+    })),
+  {
+    loading: () => (
+      <div
+        style={{
+          margin: 0,
+          borderRadius: '0.5rem',
+          padding: '0.875rem',
+          fontSize: '0.75rem',
+          lineHeight: '1.6',
+          overflowX: 'auto',
+          background: 'var(--muted)',
+        }}
+      >
+        <code>...</code>
+      </div>
+    ),
+  },
+);

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { extractText } from 'unpdf';
 import { cleanPdfText, estimateGarbleRate } from '@/lib/knowledge/pdf-cleaner';
 import { importText, listDocuments, type KnowledgeConfig } from '@/lib/knowledge';
@@ -8,7 +9,10 @@ import { invalidateLessonCache } from '@/lib/learning/lesson-cache';
 /**
  * 从上传文件中提取文本内容，支持 PDF / TXT / MD
  */
-async function extractTextFromFile(file: File): Promise<{ text: string; garbleRate?: number }> {
+async function extractTextFromFile(file: File): Promise<{
+  text: string;
+  garbleRate?: number;
+}> {
   const fileName = file.name.toLowerCase();
 
   if (fileName.endsWith('.pdf')) {
@@ -17,8 +21,10 @@ async function extractTextFromFile(file: File): Promise<{ text: string; garbleRa
     const { text: pages } = await extractText(buffer);
     const rawText = Array.isArray(pages) ? pages.join('\n') : String(pages);
     const cleaned = cleanPdfText(rawText);
-    const garbleRate = estimateGarbleRate(cleaned);
-    return { text: cleaned, garbleRate };
+    return {
+      text: cleaned,
+      garbleRate: estimateGarbleRate(cleaned),
+    };
   }
 
   // txt / md 等纯文本
@@ -108,17 +114,8 @@ export async function POST(request: NextRequest) {
       console.warn(`PDF garble rate high: ${(garbleRate * 100).toFixed(1)}% for ${file.name}`);
     }
 
-    // 添加元数据标记
-    const fullText = [
-      `【标准名称】${title || file.name}`,
-      `【标准类型】${STANDARD_INFO[type].name} ${STANDARD_INFO[type].languageLabel}`,
-      `【上传时间】${new Date().toISOString()}`,
-      '---',
-      content,
-    ].join('\n\n');
-
-    // 使用内建知识库导入
-    const result = await importText(fullText, config, {
+    // 直接传 content，元数据已在 DocumentRecord 中独立存储
+    const result = await importText(content, config, {
       filename: file.name,
       title: title || file.name,
       type,
@@ -126,6 +123,7 @@ export async function POST(request: NextRequest) {
 
     if (result.success) {
       invalidateLessonCache();
+      revalidatePath('/');
       return NextResponse.json({
         success: true,
         message: '文档导入成功',

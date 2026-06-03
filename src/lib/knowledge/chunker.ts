@@ -39,7 +39,7 @@ const APPENDIX_HEADING = /^(?:附\s*录\s*([A-Z])|([A-Z]\.\d+(?:\.\d+)*))\s*(.*)
 const EXAMPLE_MARKER = /^示例\s*\d*\s*[:：]/;
 
 /** 匹配代码块开始：缩进的代码或典型代码起始模式 */
-const CODE_START = /^(public\s|private\s|protected\s|class\s|void\s|int\s|#include|import\s|using\s|namespace\s|if\s*\(|for\s*\(|while\s*\(|try\s*\{)/;
+const CODE_START = /^(public\s|private\s|protected\s|class\s|void\s|int\s|String\s|char\s|float\s|double\s|long\s|boolean\s|byte\s|#include\b|#define\b|#pragma\b|import\s|using\s|namespace\s|if\s*\(|for\s*\(|while\s*\(|try\s*\{|catch\s*\(|return\s|switch\s*\(|case\s|static\s|const\s|var\s|let\s|function\s|def\s|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|CREATE\s|DROP\s|ALTER\s|\/\/\s|\/\*|@[A-Z]\w+|@\w+\()/;
 
 // ——— 文档结构解析 ———
 
@@ -71,6 +71,7 @@ function parseDocumentStructure(text: string): Section[] {
       if (currentSection) {
         currentSection.content += '\n';
       }
+      // 不在空行处重置 inExample — 代码示例中常含空行，仅在 heading 处重置
       continue;
     }
 
@@ -94,8 +95,9 @@ function parseDocumentStructure(text: string): Section[] {
     }
 
     // 检查是否是章节标题
+    // 守卫：形如 "1 《测试计划》 ..." 的表格行不是条款标题（标题以书名号开头）
     const headingMatch = trimmed.match(HEADING_PATTERN);
-    if (headingMatch) {
+    if (headingMatch && !headingMatch[2].trim().startsWith('《')) {
       const num = headingMatch[1];
       const title = headingMatch[2].trim();
       const level = num.split('.').length;
@@ -369,9 +371,36 @@ export function chunkText(text: string, opts?: ChunkOptions): StructuredChunk[] 
   if (!text || text.trim().length === 0) return [];
 
   const sections = parseDocumentStructure(text);
-  const chunks = flattenToChunks(sections, maxSize, overlap);
+  const filtered = filterNoiseSections(sections);
+  const chunks = flattenToChunks(filtered, maxSize, overlap);
 
   return chunks.filter((c) => c.content.trim().length > 20);
+}
+
+// ——— 噪声章节过滤 ———
+
+/**
+ * 匹配前言/目录/参考文献等无需分块的章节。
+ * 注意：不要把"概述"列入——它在国标里常是有价值的无编号正文节。
+ */
+const NOISE_SECTION_TITLES = /^(前\s*言|引\s*言|目\s*次|参考文献|参考书目|索\s*引|致\s*谢|出版说明)$/;
+
+function isNoiseSection(s: Section): boolean {
+  // 有编号的条款（如 "5.1 概述"）一律保留，绝不当作噪声
+  if (s.number) return false;
+  if (NOISE_SECTION_TITLES.test(s.title.trim())) return true;
+  // 标题前的前言/目次等会落进无标题的 general 节，噪声标记通常是首个非空行
+  const firstLine = s.content
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  return firstLine !== undefined && NOISE_SECTION_TITLES.test(firstLine);
+}
+
+function filterNoiseSections(sections: Section[]): Section[] {
+  return sections
+    .filter((s) => !isNoiseSection(s))
+    .map((s) => ({ ...s, children: filterNoiseSections(s.children) }));
 }
 
 /**
@@ -381,3 +410,4 @@ export function chunkTextSimple(text: string, opts?: ChunkOptions): string[] {
   const chunks = chunkText(text, opts);
   return chunks.map((c) => c.content);
 }
+

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { revalidatePath } from 'next/cache';
 import { listDocuments, deleteDocument } from '@/lib/knowledge';
 import { invalidateLessonCache } from '@/lib/learning/lesson-cache';
 
@@ -34,6 +35,7 @@ export async function DELETE(request: NextRequest) {
     const result = await deleteDocument(docId);
     if (result.success) {
       invalidateLessonCache();
+      revalidatePath('/');
       return NextResponse.json({ success: true });
     }
 
