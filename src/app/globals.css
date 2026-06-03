@@ -388,6 +388,14 @@
   color: color-mix(in oklab, #f59e0b 75%, var(--foreground));
 }
 
+.agent-log-audit {
+  color: var(--primary);
+}
+
+.agent-log-validator {
+  color: color-mix(in oklab, #a78bfa 80%, var(--foreground));
+}
+
 @keyframes agent-cursor-blink {
   0%,
   100% {
