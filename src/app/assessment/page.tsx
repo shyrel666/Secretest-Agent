@@ -1,43 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { Suspense, useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { TokenUsage } from '@/lib/token-usage';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Progress } from '@/components/ui/progress';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Label } from '@/components/ui/label';
-import dynamic from 'next/dynamic';
 import { toast } from 'sonner';
-import { 
-  Trophy, 
-  Target, 
-  Clock, 
-  CheckCircle, 
-  Copy,
-  Download,
-  XCircle,
-  ArrowLeft,
-  ArrowRight,
-  RotateCcw,
-  Award,
-  Sparkles,
-  FileCode,
-  AlertTriangle,
-  Loader2,
-  Brain,
-  BookOpen
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Loader2 } from 'lucide-react';
 import { getCombinedModelLabel, getModelDisplayName, useAIConfigStore } from '@/lib/store/ai-config';
 import { findRelatedLearningTopics, type LearningTopic } from '@/lib/learning/topics';
 import { useLearningProgressStore } from '@/lib/store/learning-progress';
@@ -52,17 +19,8 @@ import {
 } from '@/lib/store/assessment';
 import { AssessmentSetupWorkspace } from '@/components/assessment/assessment-setup-workspace';
 import { GenerationAgentWorkspace } from '@/components/assessment/generation-agent-workspace';
-
-const AssessmentMarkdownRenderer = dynamic(
-  () => import('@/components/assessment/assessment-markdown').then((m) => ({ default: m.AssessmentMarkdownRenderer })),
-  { loading: () => <div className="text-sm text-muted-foreground">渲染中...</div> },
-);
-
-const difficultyConfig = {
-  easy: { label: '简单', color: 'text-green-400', bgColor: 'bg-green-400/10' },
-  medium: { label: '中等', color: 'text-amber-400', bgColor: 'bg-amber-400/10' },
-  hard: { label: '困难', color: 'text-rose-400', bgColor: 'bg-rose-400/10' },
-};
+import { QuizResultWorkspace } from '@/components/assessment/quiz-result-workspace';
+import { QuizSessionWorkspace } from '@/components/assessment/quiz-session-workspace';
 
 const GENERATION_FLOW_STAGES = [
   {
@@ -741,8 +699,7 @@ function AssessmentPageContent() {
     setIsExplanationCopied(false);
   };
 
-  const elapsedMinutes = Math.floor((now - startTime) / 60000);
-  const elapsedSeconds = Math.floor(((now - startTime) % 60000) / 1000);
+  const quizElapsedMs = Math.max(0, now - startTime);
 
   // Setup Phase — 与 Agent 工作区同壳配置页
   if (phase === 'setup') {
@@ -802,178 +759,18 @@ function AssessmentPageContent() {
           .map((topic) => [topic.id, topic]),
       ).values(),
     ).slice(0, 4);
-    const learningPath = learningReport?.learningPath;
-
     return (
-      <div className="min-h-screen py-8">
-        <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-          <Card className="text-center">
-            <CardContent className="py-12">
-              <div className={cn(
-                'w-24 h-24 rounded-full mx-auto mb-6 flex items-center justify-center',
-                passed ? 'bg-green-400/10' : 'bg-rose-400/10'
-              )}>
-                {passed ? (
-                  <Award className="w-12 h-12 text-green-400" />
-                ) : (
-                  <Target className="w-12 h-12 text-rose-400" />
-                )}
-              </div>
-
-              <h1 className="text-3xl font-bold mb-2">
-                {passed ? '恭喜通过！' : '继续努力！'}
-              </h1>
-              <p className="text-muted-foreground mb-8">
-                {passed 
-                  ? '你已具备良好的代码安全审计能力' 
-                  : '建议继续学习后再次挑战'}
-              </p>
-
-              <div className="grid grid-cols-3 gap-6 mb-8">
-                <div className="bg-muted rounded-xl p-4">
-                  <div className="text-3xl font-bold text-primary">{score}%</div>
-                  <div className="text-sm text-muted-foreground">得分</div>
-                </div>
-                <div className="bg-muted rounded-xl p-4">
-                  <div className="text-3xl font-bold text-green-400">{correctCount}</div>
-                  <div className="text-sm text-muted-foreground">正确</div>
-                </div>
-                <div className="bg-muted rounded-xl p-4">
-                  <div className="text-3xl font-foreground">{answers.length - correctCount}</div>
-                  <div className="text-sm text-muted-foreground">错误</div>
-                </div>
-              </div>
-
-              {learningReportStatus !== 'idle' && (
-                <div className="mb-8 rounded-2xl border border-border/60 bg-background/70 p-5 text-left">
-                  <div className="mb-4 flex items-center gap-2">
-                    {learningReportStatus === 'loading' ? (
-                      <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                    ) : learningReportStatus === 'error' ? (
-                      <AlertTriangle className="h-5 w-5 text-amber-400" />
-                    ) : (
-                      <Sparkles className="h-5 w-5 text-primary" />
-                    )}
-                    <h3 className="font-semibold">Agent 学习报告</h3>
-                  </div>
-
-                  {learningReportStatus === 'loading' && (
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      正在结合本次答题记录生成学习报告，分数和答题回顾可先查看。
-                    </p>
-                  )}
-
-                  {learningReportStatus === 'error' && (
-                    <div className="rounded-xl border border-amber-400/20 bg-amber-400/10 p-4">
-                      <p className="text-sm font-medium text-amber-300">学习报告暂时不可用</p>
-                      <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                        {learningReportError || '本次测评结果已保留，可继续查看答题回顾和本地学习建议。'}
-                      </p>
-                    </div>
-                  )}
-
-                  {learningReportStatus === 'success' && learningPath && (
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <LearningPathList
-                        title="掌握较好"
-                        items={learningPath.strengths}
-                        fallback="本次报告暂未识别出明确优势。"
-                      />
-                      <LearningPathList
-                        title="薄弱点"
-                        items={learningPath.weaknesses}
-                        fallback="本次报告暂未识别出明确薄弱点。"
-                      />
-                      <LearningPathList
-                        title="学习建议"
-                        items={learningPath.recommendations}
-                        fallback="暂无额外学习建议。"
-                      />
-                      <LearningPathList
-                        title="下一步主题"
-                        items={learningPath.nextTopics}
-                        fallback="暂无下一步主题建议。"
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Answer Review */}
-              <div className="text-left mb-8">
-                <h3 className="font-semibold mb-4">答题回顾</h3>
-                <div className="space-y-3">
-                  {answers.map((answer, i) => (
-                    <div 
-                      key={i}
-                      className={cn(
-                        'flex items-center justify-between p-3 rounded-lg',
-                        answer.isCorrect ? 'bg-green-400/10' : 'bg-rose-400/10'
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        {answer.isCorrect ? (
-                          <CheckCircle className="w-5 h-5 text-green-400" />
-                        ) : (
-                          <XCircle className="w-5 h-5 text-rose-400" />
-                        )}
-                        <span className="text-sm">
-                          第{i + 1}题：{answer.question.vulnerabilityType}
-                        </span>
-                      </div>
-                      <Badge variant="outline" className="text-xs">
-                        {answer.question.language}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {weakTopics.length > 0 && (
-                <div className="mb-8 rounded-2xl border border-primary/20 bg-primary/5 p-5 text-left">
-                  <div className="mb-4 flex items-center gap-2">
-                    <BookOpen className="h-5 w-5 text-primary" />
-                    <h3 className="font-semibold">建议优先回到这些章节继续学</h3>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    {weakTopics.map((topic) => (
-                      <Link key={topic.id} href={`/learning/${topic.id}`}>
-                        <div className="rounded-xl border border-border/60 bg-background/70 p-4 transition-colors hover:border-primary/40">
-                          <div className="mb-2 flex items-center gap-2">
-                            <Badge variant="secondary">{getLanguageLabel(topic.language)}</Badge>
-                            <Badge variant="outline">{topic.vulnerabilityFocus}</Badge>
-                          </div>
-                          <div className="font-medium">{topic.title}</div>
-                          <p className="mt-1 text-sm leading-6 text-muted-foreground">{topic.summary}</p>
-                        </div>
-                      </Link>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex flex-wrap gap-4 justify-center">
-                <Button size="lg" onClick={handleRestart} className="gap-2">
-                  <RotateCcw className="w-4 h-4" />
-                  重新测试
-                </Button>
-                <Link href="/practice">
-                  <Button variant="outline" size="lg" className="gap-2">
-                    <Brain className="w-4 h-4" />
-                    去题库练习
-                  </Button>
-                </Link>
-                <Link href="/learning">
-                  <Button variant="outline" size="lg">
-                    <BookOpen className="w-4 h-4 mr-2" />
-                    返回学习中心
-                  </Button>
-                </Link>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <QuizResultWorkspace
+        answers={answers}
+        score={score}
+        passed={passed}
+        correctCount={correctCount}
+        learningReportStatus={learningReportStatus}
+        learningReportError={learningReportError}
+        learningReport={learningReport}
+        weakTopics={weakTopics}
+        onRestart={handleRestart}
+      />
     );
   }
 
@@ -981,317 +778,30 @@ function AssessmentPageContent() {
   if (!question) return null;
 
   return (
-    <div className="min-h-screen py-8">
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-        {/* Header */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-3">
-              <div className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-rose-400/10">
-                <Trophy className="w-5 h-5 text-rose-400" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold">能力测评</h1>
-                <p className="text-sm text-muted-foreground">
-                  AI智能生成 · 多Agent审核
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-4 text-sm text-muted-foreground">
-              <div className="flex items-center gap-1">
-                <Clock className="w-4 h-4" />
-                {elapsedMinutes}:{elapsedSeconds.toString().padStart(2, '0')}
-              </div>
-              <div className="flex items-center gap-1">
-                <Target className="w-4 h-4" />
-                {currentQuestion + 1} / {questions.length}
-              </div>
-            </div>
-          </div>
-          <Progress value={progress} className="h-2" />
-          {/* Question Index Dots */}
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {questions.map((_, idx) => {
-              const isAnswered = idx < answers.length;
-              const isCurrent = idx === currentQuestion;
-              const isCorrect = isAnswered && answers[idx].isCorrect;
-              return (
-                <button
-                  key={idx}
-                  onClick={() => (isAnswered || idx === answers.length) && navigateToQuestion(idx)}
-                  disabled={!isAnswered && idx !== answers.length}
-                  className={cn(
-                    'h-7 w-7 rounded-md text-xs font-medium transition-all',
-                    isCurrent && 'ring-2 ring-primary ring-offset-1 ring-offset-background',
-                    isAnswered && isCorrect && 'bg-green-400/20 text-green-400',
-                    isAnswered && !isCorrect && 'bg-rose-400/20 text-rose-400',
-                    !isAnswered && idx === answers.length && 'bg-muted text-muted-foreground hover:bg-muted/80',
-                    !isAnswered && idx !== answers.length && 'bg-muted/30 text-muted-foreground/40 cursor-not-allowed',
-                  )}
-                >
-                  {idx + 1}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Question Card */}
-        <Card className="mb-6">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Badge className={cn(difficultyConfig[question.difficulty].bgColor, difficultyConfig[question.difficulty].color)}>
-                  {difficultyConfig[question.difficulty].label}
-                </Badge>
-                <Badge variant="outline">{question.language}</Badge>
-                {/* <Badge variant="outline" className="text-xs">
-                  {question.vulnerabilityType}
-                </Badge> */}
-              </div>
-              {question.standardReference && (
-                <Badge variant="secondary" className="text-xs">
-                  {question.standardReference}
-                </Badge>
-              )}
-            </div>
-            <CardTitle className="text-lg mt-4">{question.question}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {/* Code Block */}
-            <div className="relative">
-              <div className="absolute top-2 right-2">
-                <FileCode className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <pre className="text-sm bg-muted p-4 rounded-lg overflow-x-auto font-mono">
-                {question.code}
-              </pre>
-            </div>
-
-            {/* Options */}
-            <RadioGroup
-              value={selectedAnswer?.toString()}
-              onValueChange={(v) => handleAnswer(parseInt(v))}
-              className="space-y-3"
-            >
-              {question.options.map((option, index) => (
-                <div
-                  key={index}
-                  className={cn(
-                    'flex items-center space-x-3 p-4 rounded-lg border transition-colors cursor-pointer',
-                    selectedAnswer === index && 'border-primary bg-primary/5',
-                    showResult && index === question.correctAnswer && 'border-green-400 bg-green-400/10',
-                    showResult && selectedAnswer === index && index !== question.correctAnswer && 'border-rose-400 bg-rose-400/10'
-                  )}
-                  onClick={() => !showResult && setSelectedAnswer(index)}
-                >
-                  <RadioGroupItem value={index.toString()} id={`option-${index}`} disabled={showResult} />
-                  <Label htmlFor={`option-${index}`} className="flex-1 cursor-pointer">
-                    {option}
-                  </Label>
-                  {showResult && index === question.correctAnswer && (
-                    <CheckCircle className="w-5 h-5 text-green-400" />
-                  )}
-                  {showResult && selectedAnswer === index && index !== question.correctAnswer && (
-                    <XCircle className="w-5 h-5 text-rose-400" />
-                  )}
-                </div>
-              ))}
-            </RadioGroup>
-
-            {/* Explanation */}
-            {showResult && (
-              <div className="space-y-4">
-                {/* Base Explanation */}
-                <div className="bg-muted/50 rounded-lg p-4">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                    <div>
-                      <h4 className="font-semibold text-sm mb-1">基础解析</h4>
-                      <p className="text-sm text-muted-foreground">{question.explanation}</p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* AI Explanation */}
-                {(explanation || isExplaining) && (
-                  <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Brain className="w-5 h-5 text-primary" />
-                        <span>AI 详细讲解已生成，建议在弹窗中阅读</span>
-                        {isExplaining && (
-                          <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                        )}
-                      </div>
-                      <Button type="button" variant="outline" onClick={() => setShowFullExplanation(true)}>
-                        查看详细讲解
-                      </Button>
-                    </div>
-
-                    {currentRelatedTopics.length > 0 && (
-                      <div className="rounded-xl border border-border/60 bg-background/70 p-4 text-left">
-                        <div className="mb-3 flex items-center gap-2 text-sm font-medium">
-                          <BookOpen className="h-4 w-4 text-primary" />
-                          对应学习章节
-                        </div>
-                        <div className="grid gap-3 md:grid-cols-2">
-                          {currentRelatedTopics.map((topic) => (
-                            <Link key={topic.id} href={`/learning/${topic.id}`}>
-                              <div className="rounded-lg border border-border/60 p-3 transition-colors hover:border-primary/40">
-                                <div className="mb-2 flex items-center gap-2">
-                                  <Badge variant="secondary">{getLanguageLabel(topic.language)}</Badge>
-                                  <Badge variant="outline">{topic.vulnerabilityFocus}</Badge>
-                                </div>
-                                <div className="font-medium">{topic.title}</div>
-                                <p className="mt-1 text-sm leading-6 text-muted-foreground">{topic.summary}</p>
-                              </div>
-                            </Link>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Dialog open={showFullExplanation} onOpenChange={setShowFullExplanation}>
-          <DialogContent className="max-h-[90vh] max-w-5xl overflow-hidden p-0 sm:max-w-4xl lg:max-w-5xl">
-            <DialogHeader className="border-b px-6 py-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <DialogTitle className="flex items-center gap-2">
-                  <Brain className="h-5 w-5 text-primary" />
-                  AI详细讲解
-                </DialogTitle>
-                <div className="flex flex-wrap items-center gap-2 pr-10">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="gap-2"
-                    onClick={handleCopyExplanation}
-                    disabled={!explanation}
-                  >
-                    <Copy className="h-4 w-4" />
-                    {isExplanationCopied ? '已复制' : '复制讲解'}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="gap-2"
-                    onClick={handleDownloadExplanation}
-                    disabled={!explanation}
-                  >
-                    <Download className="h-4 w-4" />
-                    导出 Markdown
-                  </Button>
-                </div>
-              </div>
-            </DialogHeader>
-
-            <div className="max-h-[calc(90vh-88px)] overflow-y-auto px-6 py-5">
-              <AssessmentMarkdownRenderer content={explanation || '正在生成讲解...'} />
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Actions */}
-        <div className="flex justify-between">
-          <div className="flex items-center gap-2">
-            {currentQuestion > 0 && (
-              <Button variant="outline" onClick={handlePrev} className="gap-2">
-                <ArrowLeft className="w-4 h-4" />
-                上一题
-              </Button>
-            )}
-            <div className="text-sm text-muted-foreground">
-              {isReviewingPast ? (
-                <span className="flex items-center gap-1">
-                  <CheckCircle className="w-4 h-4 text-muted-foreground" />
-                  回顾已答题目
-                </span>
-              ) : showResult ? (
-                <span className="text-green-400 flex items-center gap-1">
-                  <CheckCircle className="w-4 h-4" />
-                  {selectedAnswer === question.correctAnswer ? '回答正确！' : '答案已显示'}
-                </span>
-              ) : (
-                '选择一个答案后继续'
-              )}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            {isReviewingPast ? (
-              <Button onClick={handleNext} className="gap-2">
-                {currentQuestion < answers.length - 1 ? (
-                  <>
-                    下一题
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                ) : (
-                  <>
-                    继续答题
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
-              </Button>
-            ) : !showResult ? (
-              <Button 
-                onClick={handleShowResult} 
-                disabled={selectedAnswer === null}
-              >
-                提交答案
-              </Button>
-            ) : (
-              <Button onClick={handleNext} className="gap-2">
-                {currentQuestion < questions.length - 1 ? (
-                  <>
-                    下一题
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                ) : (
-                  <>
-                    完成测评
-                    <Trophy className="w-4 h-4" />
-                  </>
-                )}
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LearningPathList({
-  title,
-  items,
-  fallback,
-}: {
-  title: string;
-  items: string[];
-  fallback: string;
-}) {
-  return (
-    <div className="rounded-xl border border-border/60 bg-muted/20 p-4">
-      <div className="mb-2 text-sm font-medium text-foreground">{title}</div>
-      {items.length > 0 ? (
-        <ul className="space-y-2">
-          {items.map((item, index) => (
-            <li key={`${title}-${index}`} className="text-sm leading-6 text-muted-foreground">
-              {item}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-sm leading-6 text-muted-foreground">{fallback}</p>
-      )}
-    </div>
+    <QuizSessionWorkspace
+      question={question}
+      questions={questions}
+      answers={answers}
+      currentQuestion={currentQuestion}
+      selectedAnswer={selectedAnswer}
+      showResult={showResult}
+      isReviewingPast={isReviewingPast}
+      progress={progress}
+      elapsedMs={quizElapsedMs}
+      explanation={explanation}
+      isExplaining={isExplaining}
+      showFullExplanation={showFullExplanation}
+      onShowFullExplanationChange={setShowFullExplanation}
+      isExplanationCopied={isExplanationCopied}
+      relatedTopics={currentRelatedTopics}
+      onSelectAnswer={handleAnswer}
+      onNavigateQuestion={navigateToQuestion}
+      onPrev={handlePrev}
+      onShowResult={handleShowResult}
+      onNext={handleNext}
+      onCopyExplanation={handleCopyExplanation}
+      onDownloadExplanation={handleDownloadExplanation}
+    />
   );
 }
 
