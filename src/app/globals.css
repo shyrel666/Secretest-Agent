@@ -258,3 +258,143 @@
   animation: generation-glow 2.4s ease-in-out infinite;
 }
 
+@keyframes agent-pulse-ring {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  70% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+@keyframes agent-pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 45%, transparent);
+  }
+  50% {
+    opacity: 0.85;
+    box-shadow: 0 0 10px 2px color-mix(in oklab, var(--primary) 35%, transparent);
+  }
+}
+
+@keyframes agent-status-shine {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes agent-timer-tick {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.92;
+  }
+}
+
+.agent-work-status-bar {
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, var(--foreground) 6%, transparent),
+    0 8px 24px color-mix(in oklab, var(--primary) 8%, transparent);
+}
+
+.agent-work-status-shine {
+  background: linear-gradient(
+    105deg,
+    transparent 38%,
+    color-mix(in oklab, var(--primary) 12%, transparent) 50%,
+    transparent 62%
+  );
+  animation: agent-status-shine 4.5s ease-in-out infinite;
+}
+
+.agent-work-pulse-ring {
+  border: 1px solid color-mix(in oklab, var(--primary) 35%, transparent);
+  animation: agent-pulse-ring 1.8s ease-out infinite;
+}
+
+.agent-work-pulse-dot {
+  animation: agent-pulse-dot 1.8s ease-in-out infinite;
+}
+
+.agent-work-timer-value {
+  animation: agent-timer-tick 1s ease-in-out infinite;
+}
+
+.agent-work-progress-fill {
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--primary) 88%, transparent),
+    color-mix(in oklab, var(--chart-2) 70%, transparent)
+  );
+  box-shadow: 0 0 12px color-mix(in oklab, var(--primary) 40%, transparent);
+}
+
+.agent-workspace {
+  width: 100%;
+  background:
+    radial-gradient(ellipse 90% 55% at 50% -5%, color-mix(in oklab, var(--primary) 10%, transparent), transparent),
+    radial-gradient(ellipse 70% 45% at 100% 50%, color-mix(in oklab, var(--chart-2) 6%, transparent), transparent);
+}
+
+.agent-workspace-panel {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--foreground) 4%, transparent),
+    0 24px 48px color-mix(in oklab, var(--background) 40%, transparent);
+}
+
+.agent-workspace-console {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--primary) 30%, transparent) transparent;
+}
+
+.agent-workspace-cursor {
+  animation: agent-cursor-blink 1s step-end infinite;
+}
+
+.agent-workspace-step-active {
+  animation: generation-glow 2.4s ease-in-out infinite;
+}
+
+.agent-workspace-timer {
+  animation: agent-timer-tick 1s ease-in-out infinite;
+}
+
+.agent-log-orchestrator {
+  color: color-mix(in oklab, var(--chart-2) 90%, var(--foreground));
+}
+
+.agent-log-knowledge {
+  color: color-mix(in oklab, var(--chart-3) 90%, var(--foreground));
+}
+
+.agent-log-questionGenerator {
+  color: var(--primary);
+}
+
+.agent-log-reviewer {
+  color: color-mix(in oklab, #f59e0b 75%, var(--foreground));
+}
+
+@keyframes agent-cursor-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+

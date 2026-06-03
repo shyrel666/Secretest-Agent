@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "ts-check": "tsc -p tsconfig.json",
     "eval:retrieval": "tsx scripts/eval-retrieval.ts",
+    "test": "tsx --test \"src/**/__tests__/**/*.test.ts\"",
     "test:knowledge": "tsx --test src/lib/knowledge/**/__tests__/**/*.test.ts"
   },
   "dependencies": {

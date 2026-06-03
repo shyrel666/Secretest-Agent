@@ -53,6 +53,7 @@ import { cn } from '@/lib/utils';
 import { ThemedCodeBlock } from '@/components/ui/themed-code-block';
 import { useTokenUsageStore } from '@/lib/store/token-usage';
 import { findRelatedLearningTopics } from '@/lib/learning/topics';
+import { normalizeExplanationMarkdown } from '@/lib/markdown/normalize-explanation';
 import type { QuestionWithStats, QuestionDetail, QuestionBankStats, MasteryStatus } from '@/lib/question-bank/sqlite-store';
 
 import { STANDARD_INFO, type StandardType } from '@/lib/standards';
@@ -337,7 +338,7 @@ function AiExplanationSection({
               </div>
             )}
             {aiContent && (
-              <div className="prose prose-sm dark:prose-invert max-w-none pr-2 [&_h1]:mb-5 [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:mb-4 [&_h2]:mt-8 [&_h2]:text-xl [&_h2]:font-semibold [&_h3]:mb-3 [&_h3]:mt-6 [&_h3]:text-lg [&_h3]:font-semibold">
+              <div className="prose prose-sm dark:prose-invert max-w-none pr-2 [&_h1]:mb-5 [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:mb-4 [&_h2]:mt-8 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:border-b [&_h2]:border-border/50 [&_h2]:pb-2 [&_h3]:mb-3 [&_h3]:mt-6 [&_h3]:text-lg [&_h3]:font-semibold">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
@@ -374,7 +375,7 @@ function AiExplanationSection({
                     },
                   }}
                 >
-                  {aiContent}
+                  {normalizeExplanationMarkdown(aiContent)}
                 </ReactMarkdown>
               </div>
             )}

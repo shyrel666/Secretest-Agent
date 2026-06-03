@@ -11,6 +11,7 @@ import { sumTokenUsage, type TokenUsage } from '@/lib/token-usage';
 import type { RetrievalTraceItem, ToolCitation } from '@/lib/knowledge/mcp-tools';
 import { shuffleQuestionOptions } from '@/lib/question-option-randomizer';
 import { getDocumentSections, isReadableKnowledgeTitle } from '@/lib/knowledge';
+import { buildSeedPlan, getDifficultyForIndex } from './seed-plan';
 
 // Agent配置集合
 export interface AgentsConfig {
@@ -216,55 +217,35 @@ export class AgentOrchestrator {
     const citations: ToolCitation[] = [];
     const groundingIssues: string[] = [];
     const retrievalTrace: RetrievalTraceItem[] = [];
-    const distribution = buildDifficultyDistribution(total);
     const seedQuestions: Question[] = [];
     const reviewScores: number[] = [];
     const coverageTargets = params.vulnerabilityType
       ? []
       : buildCoverageExpansionTargets(params.language, params.coveredVulnerabilityTypes || [], total);
+    const seedEntries = buildSeedPlan(total, coverageTargets);
     let supplementAttemptCount = 0;
     let duplicateTypeRejectCount = 0;
     let duplicateSimilarityRejectCount = 0;
     let reviewFailureCount = 0;
     let generationFailureCount = 0;
     const abortedError = '题目集生成已取消';
-    const maxSupplementAttemptCount = Math.max(total * 3, 8);
+    const maxSupplementAttemptCount = Math.max(total * 5, 12);
+    const excludedSeedTypes = [...(params.coveredVulnerabilityTypes || [])];
 
     params.onStage?.({
-      label: '批量检索知识库',
-      detail: '正在按难度批量检索知识库并生成候选题…',
+      label: '检索知识库',
+      detail: '正在检索知识库并逐题生成候选题…',
       progress: 18,
     });
 
-    const seedEntries = coverageTargets.length > 0
-      ? coverageTargets.map((target, index) => ({
-        difficulty: getDifficultyForIndex(index, total),
-        count: 1,
-        target,
-      }))
-      : (Object.entries(distribution) as Array<[
-        'easy' | 'medium' | 'hard',
-        number,
-      ]>).map(([difficulty, count]) => ({
-        difficulty,
-        count,
-        target: undefined,
-      }));
-
-    const seedResults = await Promise.all(seedEntries.map(async ({ difficulty, count, target }) => {
+    for (const [index, { difficulty, count, target }] of seedEntries.entries()) {
       if (params.shouldAbort?.() || count <= 0) {
-        return {
-          difficulty,
-          count,
-          result: null,
-        };
+        continue;
       }
 
       params.onStage?.({
-        label: '批量生成题目',
-        detail: target
-          ? `正在生成 ${difficultyLabelMap[difficulty]}题：${target.title}…`
-          : `正在生成 ${difficultyLabelMap[difficulty]}题候选集（${count} 道）…`,
+        label: '生成候选题目',
+        detail: `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[difficulty]}难度候选题…`,
         progress: getSeedGenerationProgress(difficulty),
       });
 
@@ -273,22 +254,10 @@ export class AgentOrchestrator {
         difficulty,
         vulnerabilityType: params.vulnerabilityType || target?.title,
         targetClauseNumber: target?.clauseNumber,
-        excludedVulnerabilityTypes: [],
+        excludedVulnerabilityTypes: params.vulnerabilityType ? [] : excludedSeedTypes,
         coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
         count,
       });
-
-      return {
-        difficulty,
-        count,
-        result: seedResult,
-      };
-    }));
-
-    for (const { difficulty, result: seedResult } of seedResults) {
-      if (!seedResult) {
-        continue;
-      }
 
       if (seedResult.usage) {
         usages.push(seedResult.usage);
@@ -301,9 +270,16 @@ export class AgentOrchestrator {
 
       if (seedResult.success && seedResult.questions?.length) {
         seedQuestions.push(...seedResult.questions);
+        if (!params.vulnerabilityType) {
+          for (const question of seedResult.questions) {
+            if (question.vulnerabilityType) {
+              excludedSeedTypes.push(question.vulnerabilityType);
+            }
+          }
+        }
       } else {
         generationFailureCount++;
-        errors.push(seedResult.error || `${difficulty} 难度题目生成失败`);
+        errors.push(seedResult.error || `第 ${index + 1} 道候选题生成失败`);
       }
     }
 
@@ -369,11 +345,17 @@ export class AgentOrchestrator {
       questions.push(shuffleQuestionOptions(reviewResult.question));
     }
 
+    // 当唯一类型补题连续失败、知识库可用类型不足时，放开“类型必须唯一”的约束，
+    // 允许用同一漏洞类型但不同代码/条款的题目补足名额（仍靠内容近似度拦截真正的重复题）。
+    let relaxTypeUniqueness = false;
+
     while (questions.length < total && supplementAttemptCount < maxSupplementAttemptCount) {
       if (params.shouldAbort?.()) {
         break;
       }
 
+      const questionsCountBeforeBatch = questions.length;
+      const allowSameVulnerabilityType = Boolean(params.vulnerabilityType) || relaxTypeUniqueness;
       const batchStartIndex = questions.length;
       const missingCount = total - questions.length;
       const remainingAttempts = maxSupplementAttemptCount - supplementAttemptCount;
@@ -385,16 +367,21 @@ export class AgentOrchestrator {
       params.onProgress?.(Math.min(batchStartIndex + 1, total), total);
       params.onStage?.({
         label: '补齐缺失题目',
-        detail: `候选题不足，正在并发补 ${supplementBatchSize} 道候选题…`,
+        detail: relaxTypeUniqueness
+          ? `候选类型不足，正在放宽类型限制并发补 ${supplementBatchSize} 道候选题…`
+          : `候选题不足，正在并发补 ${supplementBatchSize} 道候选题…`,
         progress: getFallbackProgress(batchStartIndex + 1, total),
       });
 
-      const excludedTypesSnapshot = questions.map((question) => question.vulnerabilityType);
+      const excludedTypesSnapshot = allowSameVulnerabilityType
+        ? []
+        : questions.map((question) => question.vulnerabilityType);
       const supplementResults = await Promise.all(
         Array.from({ length: supplementBatchSize }, async (_, batchIndex) => {
           const attemptNumber = supplementAttemptCount + batchIndex + 1;
           const targetQuestionIndex = Math.min(batchStartIndex + batchIndex, total - 1);
-          const supplementTarget = params.vulnerabilityType
+          // 放宽模式下不再锁定具体条款，让生成器自由选择知识库中最易回查的漏洞类型，提升补题成功率。
+          const supplementTarget = (params.vulnerabilityType || relaxTypeUniqueness)
             ? undefined
             : pickSupplementCoverageTarget(coverageTargets, targetQuestionIndex, attemptNumber);
 
@@ -405,6 +392,7 @@ export class AgentOrchestrator {
             targetClauseNumber: params.vulnerabilityType ? undefined : supplementTarget?.clauseNumber,
             excludedVulnerabilityTypes: params.vulnerabilityType ? [] : excludedTypesSnapshot,
             coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
+            maxRetries: Math.max(6, missingCount * 3),
             shouldAbort: params.shouldAbort,
           });
 
@@ -436,7 +424,7 @@ export class AgentOrchestrator {
           continue;
         }
 
-        const dedupeKey = buildQuestionDedupeKey(result.question, Boolean(params.vulnerabilityType));
+        const dedupeKey = buildQuestionDedupeKey(result.question, allowSameVulnerabilityType);
         if (seenQuestionKeys.has(dedupeKey)) {
           duplicateTypeRejectCount++;
           if (supplementAttemptCount >= maxSupplementAttemptCount) {
@@ -457,6 +445,12 @@ export class AgentOrchestrator {
 
         seenQuestionKeys.add(dedupeKey);
         questions.push(shuffleQuestionOptions(result.question));
+      }
+
+      // 一整批补题都没能新增题目（通常是唯一类型已耗尽或反复命中重复类型），
+      // 放宽类型唯一性约束，让后续补题可以用同类型不同内容的题目凑齐名额。
+      if (!relaxTypeUniqueness && questions.length === questionsCountBeforeBatch && !params.vulnerabilityType) {
+        relaxTypeUniqueness = true;
       }
     }
 
@@ -832,10 +826,35 @@ function buildCoverageExpansionTargets(
     }
   }
 
-  return targets
-    .filter((target) => !covered.has(normalizeVulnerabilityType(target.title)))
-    .sort((left, right) => compareClauseNumbers(left.clauseNumber, right.clauseNumber))
-    .slice(0, limit);
+  const uncovered = targets.filter(
+    (target) => !covered.has(normalizeVulnerabilityType(target.title)),
+  );
+
+  // 在“未覆盖”条款里随机抽样，而不是固定取条款号最靠前的 N 个。
+  // 这样跨会话能轮换到不同漏洞类型（即使尚未答题也不会每次都是同几类），
+  // 同时避免少数难以回查的靠前条款长期占住队头、阻塞其它类型出题。
+  const selected = shuffleList(uncovered).slice(0, limit);
+
+  // 已覆盖类型全部抽完时（未覆盖池小于需求），用已覆盖类型随机补足，保证仍有目标可锚定。
+  if (selected.length < limit) {
+    const coveredTargets = shuffleList(
+      targets.filter((target) => covered.has(normalizeVulnerabilityType(target.title))),
+    );
+    selected.push(...coveredTargets.slice(0, limit - selected.length));
+  }
+
+  return selected;
+}
+
+function shuffleList<T>(items: T[]): T[] {
+  const copy = [...items];
+
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+
+  return copy;
 }
 
 function resolveCoverageStandardTypes(language: AssessmentLanguage | undefined): StandardType[] {
@@ -844,21 +863,6 @@ function resolveCoverageStandardTypes(language: AssessmentLanguage | undefined):
   }
 
   return ['java', 'cpp', 'csharp'];
-}
-
-function compareClauseNumbers(left: string, right: string): number {
-  const leftParts = left.split('.').map(Number);
-  const rightParts = right.split('.').map(Number);
-  const maxLength = Math.max(leftParts.length, rightParts.length);
-
-  for (let index = 0; index < maxLength; index++) {
-    const diff = (leftParts[index] || 0) - (rightParts[index] || 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  return 0;
 }
 
 function pickSupplementCoverageTarget(
@@ -872,14 +876,6 @@ function pickSupplementCoverageTarget(
 
   const offset = Math.max(supplementAttemptCount - 1, 0);
   return targets[(questionIndex + offset) % targets.length];
-}
-
-function buildDifficultyDistribution(total: number): Record<'easy' | 'medium' | 'hard', number> {
-  const easy = Math.round(total * 0.3);
-  const medium = Math.round(total * 0.5);
-  const hard = Math.max(total - easy - medium, 0);
-
-  return { easy, medium, hard };
 }
 
 const difficultyLabelMap: Record<'easy' | 'medium' | 'hard', string> = {
@@ -916,21 +912,6 @@ function getFallbackProgress(current: number, total: number): number {
   }
 
   return Math.min(94, Math.round(88 + (current / total) * 6));
-}
-
-function getDifficultyForIndex(
-  index: number,
-  total: number,
-): 'easy' | 'medium' | 'hard' {
-  if (index < total * 0.3) {
-    return 'easy';
-  }
-
-  if (index < total * 0.8) {
-    return 'medium';
-  }
-
-  return 'hard';
 }
 
 function buildQuestionDedupeKey(question: Question, allowSameVulnerabilityType: boolean): string {

@@ -41,7 +41,7 @@ import { cn } from '@/lib/utils';
 import { getCombinedModelLabel, getModelDisplayName, useAIConfigStore } from '@/lib/store/ai-config';
 import { findRelatedLearningTopics, type LearningTopic } from '@/lib/learning/topics';
 import { useLearningProgressStore } from '@/lib/store/learning-progress';
-import { STANDARD_INFO, getLanguageLabel, isStandardType, type AssessmentLanguage, type StandardType } from '@/lib/standards';
+import { getLanguageLabel, isStandardType, type AssessmentLanguage, type StandardType } from '@/lib/standards';
 import { hasTokenUsage, sumTokenUsage } from '@/lib/token-usage';
 import { useTokenUsageStore } from '@/lib/store/token-usage';
 import { hasLearningReportContent } from '@/lib/assessment-report';
@@ -50,6 +50,8 @@ import {
   type AssessmentQuestion as Question,
   type AssessmentLearningReport as LearningReport,
 } from '@/lib/store/assessment';
+import { AssessmentSetupWorkspace } from '@/components/assessment/assessment-setup-workspace';
+import { GenerationAgentWorkspace } from '@/components/assessment/generation-agent-workspace';
 
 const AssessmentMarkdownRenderer = dynamic(
   () => import('@/components/assessment/assessment-markdown').then((m) => ({ default: m.AssessmentMarkdownRenderer })),
@@ -131,14 +133,24 @@ function AssessmentPageContent() {
   const [learningReport, setLearningReport] = useState<LearningReport | null>(null);
   const [learningReportStatus, setLearningReportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [learningReportError, setLearningReportError] = useState('');
+  const [generationStartTime, setGenerationStartTime] = useState<number | null>(null);
 
-  // 每秒计时器
+  // 答题阶段每秒计时
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (phase !== 'quiz') return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [phase]);
+
+  useEffect(() => {
+    if (phase === 'generating' && generationStartTime === null) {
+      setGenerationStartTime(Date.now());
+    }
+    if (phase !== 'generating') {
+      setGenerationStartTime(null);
+    }
+  }, [phase, generationStartTime]);
   const [isExplanationCopied, setIsExplanationCopied] = useState(false);
   const [availableKnowledgeTypes, setAvailableKnowledgeTypes] = useState<StandardType[]>([]);
   const [learningTopics, setLearningTopics] = useState<LearningTopic[]>([]);
@@ -415,6 +427,7 @@ function AssessmentPageContent() {
 
   // 生成题目
   const generateQuestions = useCallback(async () => {
+    setGenerationStartTime(Date.now());
     setPhase('generating');
     setGenerationStage({
       label: '准备出题参数',
@@ -731,198 +744,40 @@ function AssessmentPageContent() {
   const elapsedMinutes = Math.floor((now - startTime) / 60000);
   const elapsedSeconds = Math.floor(((now - startTime) % 60000) / 1000);
 
-  // Setup Phase
+  // Setup Phase — 与 Agent 工作区同壳配置页
   if (phase === 'setup') {
     return (
-      <div className="min-h-screen py-8">
-        <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
-          <Card>
-            <CardHeader className="text-center">
-              <div className="w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4 flex items-center justify-center">
-                <Brain className="w-8 h-8 text-primary" />
-              </div>
-              <CardTitle className="text-2xl">AI智能测评</CardTitle>
-              <p className="text-muted-foreground">
-                基于知识库内容，AI自动生成专业测评题目
-              </p>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {/* Language Selection */}
-              <div>
-                <Label className="text-sm font-medium mb-3 block">选择语言标准</Label>
-                {focusTopicTitle && (
-                  <div className="mb-3 rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-sm text-primary">
-                    当前为学习章节练习：{focusTopicTitle}
-                    {focusVulnerabilityType ? ` · 聚焦 ${focusVulnerabilityType}` : ''}
-                  </div>
-                )}
-                <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                  {[
-                    { value: 'java', label: 'Java', desc: hasJavaKnowledge ? STANDARD_INFO.java.name : '未上传 Java 标准' },
-                    { value: 'cpp', label: 'C/C++', desc: hasCppKnowledge ? STANDARD_INFO.cpp.name : '未上传 C/C++ 标准' },
-                    { value: 'csharp', label: 'C#', desc: hasCsharpKnowledge ? STANDARD_INFO.csharp.name : '未上传 C# 标准' },
-                    { value: 'mixed', label: '混合', desc: hasMixedKnowledge ? `已启用 ${availableKnowledgeTypes.length} 类标准` : '需至少上传两类标准' },
-                  ].map((option) => (
-                    <button
-                      key={option.value}
-                      onClick={() => setSetupOptions(prev => ({ ...prev, language: option.value as AssessmentLanguage }))}
-                      disabled={
-                        (option.value === 'java' && !hasJavaKnowledge) ||
-                        (option.value === 'cpp' && !hasCppKnowledge) ||
-                        (option.value === 'csharp' && !hasCsharpKnowledge) ||
-                        (option.value === 'mixed' && !hasMixedKnowledge)
-                      }
-                      className={cn(
-                        'p-4 rounded-lg border text-center transition-all',
-                        setupOptions.language === option.value
-                          ? 'border-primary bg-primary/10'
-                          : 'border-border hover:border-primary/50',
-                        ((option.value === 'java' && !hasJavaKnowledge) ||
-                          (option.value === 'cpp' && !hasCppKnowledge) ||
-                          (option.value === 'csharp' && !hasCsharpKnowledge) ||
-                          (option.value === 'mixed' && !hasMixedKnowledge)) &&
-                          'cursor-not-allowed opacity-45 hover:border-border'
-                      )}
-                    >
-                      <div className="font-medium">{option.label}</div>
-                      <div className="text-xs text-muted-foreground">{option.desc}</div>
-                    </button>
-                  ))}
-                </div>
-                {availableKnowledgeTypes.length === 0 && (
-                  <p className="mt-3 text-xs text-amber-400">
-                    当前尚未上传任何标准文档，无法生成测评题。
-                  </p>
-                )}
-              </div>
-
-              {/* Question Count */}
-              <div>
-                <Label className="text-sm font-medium mb-3 block">题目数量</Label>
-                <div className="flex gap-2">
-                  {[3, 5, 8, 10].map((count) => (
-                    <Button
-                      key={count}
-                      variant={setupOptions.totalQuestions === count ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => setSetupOptions(prev => ({ ...prev, totalQuestions: count }))}
-                    >
-                      {count} 题
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Info */}
-              <div className="bg-muted/50 rounded-lg p-4">
-                <div className="flex gap-3">
-                  <BookOpen className="w-5 h-5 text-primary shrink-0 mt-0.5" />
-                  <div className="text-sm text-muted-foreground">
-                    <p className="font-medium text-foreground mb-1">测评说明</p>
-                    <ul className="space-y-1">
-                      <li>• AI基于知识库内容智能生成题目</li>
-                      <li>• 每道题目经过审核确保质量</li>
-                      <li>• 答错后可获得详细讲解</li>
-                      <li>• 完成后生成学习路径建议</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-
-              <Button 
-                size="lg" 
-                className="w-full gap-2"
-                onClick={generateQuestions}
-              >
-                <Sparkles className="w-4 h-4" />
-                开始生成题目
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <AssessmentSetupWorkspace
+        flowStages={GENERATION_FLOW_STAGES}
+        language={setupOptions.language}
+        totalQuestions={setupOptions.totalQuestions}
+        onLanguageChange={(value) => setSetupOptions((prev) => ({ ...prev, language: value }))}
+        onQuestionCountChange={(count) => setSetupOptions((prev) => ({ ...prev, totalQuestions: count }))}
+        onGenerate={generateQuestions}
+        hasJavaKnowledge={hasJavaKnowledge}
+        hasCppKnowledge={hasCppKnowledge}
+        hasCsharpKnowledge={hasCsharpKnowledge}
+        hasMixedKnowledge={hasMixedKnowledge}
+        availableKnowledgeCount={availableKnowledgeTypes.length}
+        focusTopicTitle={focusTopicTitle || undefined}
+        focusVulnerabilityType={focusVulnerabilityType || undefined}
+      />
     );
   }
 
-  // Generating Phase
+  // Generating Phase — Agent 工作区
   if (phase === 'generating') {
     const activeStageKey = resolveGenerationStageKey(generationStage.label);
 
     return (
-      <div className="min-h-screen py-8">
-        <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
-          <Card className="assessment-generation-shell relative overflow-hidden border-primary/15 bg-card/95 shadow-2xl shadow-primary/5">
-            <div className="assessment-generation-aurora absolute inset-0 opacity-80" />
-            <div className="assessment-generation-grid absolute inset-0 opacity-40" />
-            <CardContent className="relative py-12 sm:py-16">
-              <div className="mx-auto flex max-w-3xl flex-col items-center text-center">
-                <div className="assessment-generation-orbit relative mb-8 flex h-28 w-28 items-center justify-center rounded-full border border-primary/15 bg-primary/5">
-                  <div className="assessment-generation-orbit-ring absolute inset-2 rounded-full border border-primary/10" />
-                  <div className="assessment-generation-orbit-ring delay-150 absolute inset-0 rounded-full border border-primary/10" />
-                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-primary/12 shadow-lg shadow-primary/10">
-                    <Brain className="h-8 w-8 text-primary" />
-                  </div>
-                </div>
-
-                <h2 className="mb-4 text-4xl font-bold tracking-tight sm:text-5xl">正在生成题目</h2>
-                <div className="mb-8 flex items-center gap-2 text-primary">
-                  <span className="text-base font-medium">当前阶段：{generationStage.label}</span>
-                  <span className="assessment-loading-dots inline-flex gap-1" aria-hidden="true">
-                    <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                  </span>
-                </div>
-
-                <div className="mb-8 grid w-full gap-3 md:grid-cols-3">
-                  {GENERATION_FLOW_STAGES.map((stage, index) => {
-                    const activeIndex = GENERATION_FLOW_STAGES.findIndex((item) => item.key === activeStageKey);
-                    const state = index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'pending';
-
-                    return (
-                      <div
-                        key={stage.key}
-                        className={cn(
-                          'rounded-2xl border px-4 py-4 text-left transition-all duration-500',
-                          state === 'done' && 'border-primary/30 bg-primary/10 shadow-lg shadow-primary/5',
-                          state === 'active' && 'assessment-stage-active border-primary/40 bg-primary/12 shadow-lg shadow-primary/10',
-                          state === 'pending' && 'border-border/60 bg-background/40',
-                        )}
-                      >
-                        <div className="mb-2 flex items-center gap-2">
-                          <div className={cn(
-                            'flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold',
-                            state === 'done' && 'border-primary/40 bg-primary/15 text-primary',
-                            state === 'active' && 'border-primary/50 bg-primary text-primary-foreground',
-                            state === 'pending' && 'border-border/70 text-muted-foreground',
-                          )}>
-                            {state === 'done' ? <CheckCircle className="h-3.5 w-3.5" /> : index + 1}
-                          </div>
-                          <div className="text-sm font-semibold">{stage.title}</div>
-                        </div>
-                        <p className="text-sm leading-6 text-muted-foreground">{stage.description}</p>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="w-full max-w-xl">
-                  <div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
-                    <span>任务推进中</span>
-                    <span>{Math.round(generationStage.progress)}%</span>
-                  </div>
-                  <div className="assessment-progress-track relative h-3 overflow-hidden rounded-full bg-primary/10">
-                    <div
-                      className="assessment-progress-bar relative h-full rounded-full bg-primary transition-[width] duration-700 ease-out"
-                      style={{ width: `${generationStage.progress}%` }}
-                    />
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <GenerationAgentWorkspace
+        startTime={generationStartTime}
+        stage={generationStage}
+        activeStageKey={activeStageKey}
+        flowStages={GENERATION_FLOW_STAGES}
+        questionCount={setupOptions.totalQuestions}
+        languageLabel={getLanguageLabel(setupOptions.language)}
+      />
     );
   }
 
