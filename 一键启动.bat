@@ -317,8 +317,14 @@ if exist ".env.local" (
 )
 
 echo [INFO] Checking port !APP_PORT!...
-netstat -ano | findstr /R ":!APP_PORT! .*LISTENING" >nul 2>&1
-if errorlevel 1 (
+:: Use piped findstr without /R to avoid regex parsing issues on Windows
+:: First filter for exact port (with trailing space to avoid matching 109290 etc.)
+:: Then filter for LISTENING state
+set "FOUND_PID="
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":!APP_PORT! " ^| findstr "LISTENING"') do (
+    if not defined FOUND_PID set "FOUND_PID=%%p"
+)
+if not defined FOUND_PID (
     echo [OK] Port !APP_PORT! is available.
     echo.
     exit /b 0
@@ -326,7 +332,7 @@ if errorlevel 1 (
 
 echo [ERROR] Port !APP_PORT! is already in use.
 echo Processes using this port:
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R ":!APP_PORT! .*LISTENING"') do (
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":!APP_PORT! " ^| findstr "LISTENING"') do (
     echo   PID: %%p
     for /f "tokens=1" %%n in ('tasklist /FI "PID eq %%p" /NH 2^>nul') do echo   Process: %%n
 )
