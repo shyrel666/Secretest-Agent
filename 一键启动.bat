@@ -235,7 +235,7 @@ exit /b 0
 
 :verify_pnpm_runtime
 set "PNPM_VER="
-for /f "tokens=*" %%a in ('node -e "const cp=require('child_process'); const cmd=process.platform==='win32'?'pnpm.cmd':'pnpm'; const r=cp.spawnSync(cmd,['-v'],{encoding:'utf8',timeout:15000}); if (r.error) process.exit(1); if (r.status) process.exit(1); const out=String(r.stdout).trim(); if (out.length === 0) process.exit(1); console.log(out.split(/\r?\n/)[0]);" 2^>nul') do set "PNPM_VER=%%a"
+for /f "tokens=*" %%a in ('pnpm -v 2^>nul') do set "PNPM_VER=%%a"
 if not defined PNPM_VER exit /b 1
 echo [OK] pnpm found: v!PNPM_VER!
 exit /b 0
