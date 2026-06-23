@@ -51,4 +51,18 @@ describe('Windows one-click launcher', () => {
     assert.doesNotMatch(ensureNode, /where node >nul 2>&1\s+if not errorlevel 1 goto :node_ready/i);
     assert.match(ensureNode, /winget installation did not produce a usable Node\.js/i);
   });
+
+  it('makes pnpm checks visible and bounds the pnpm version probe', () => {
+    const content = readLauncher();
+    const ensurePnpm = readSection(content, ':ensure_pnpm', ':ensure_env');
+
+    const stageIndex = ensurePnpm.indexOf('echo [INFO] Checking pnpm package manager...');
+    const firstProbeIndex = ensurePnpm.indexOf('where pnpm >nul 2>&1');
+
+    assert.ok(stageIndex >= 0, 'pnpm stage message should be present');
+    assert.ok(firstProbeIndex > stageIndex, 'pnpm stage message should appear before silent probes');
+    assert.match(ensurePnpm, /:verify_pnpm_runtime/);
+    assert.match(ensurePnpm, /spawnSync\(cmd,\['-v'\].*timeout:15000/);
+    assert.doesNotMatch(ensurePnpm, /\('pnpm -v 2\^>nul'\)/);
+  });
 });

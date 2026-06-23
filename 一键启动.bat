@@ -179,18 +179,31 @@ echo.
 exit /b 0
 
 :ensure_pnpm
+echo [INFO] Checking pnpm package manager...
 where pnpm >nul 2>&1
-if not errorlevel 1 goto :pnpm_ready
+if not errorlevel 1 (
+    call :verify_pnpm_runtime
+    if not errorlevel 1 (
+        echo.
+        exit /b 0
+    )
+    echo [WARN] Existing pnpm command is not usable or did not respond within 15 seconds.
+    echo [INFO] Trying Corepack...
+) else (
+    echo [WARN] pnpm was not found. Trying Corepack...
+)
 
-echo [WARN] pnpm was not found. Trying Corepack...
 set "COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
 where corepack >nul 2>&1
 if not errorlevel 1 (
     call corepack enable
     call corepack prepare pnpm@9.0.0 --activate
     call :refresh_path
-    where pnpm >nul 2>&1
-    if not errorlevel 1 goto :pnpm_ready
+    call :verify_pnpm_runtime
+    if not errorlevel 1 (
+        echo.
+        exit /b 0
+    )
 )
 
 echo [WARN] Corepack did not provide pnpm. Trying npm global install...
@@ -210,18 +223,21 @@ if errorlevel 1 (
 
 call :refresh_path
 call :add_npm_prefix_to_path
-where pnpm >nul 2>&1
+call :verify_pnpm_runtime
 if errorlevel 1 (
-    echo [ERROR] pnpm was installed, but this terminal cannot find pnpm.
+    echo [ERROR] pnpm was installed, but this terminal cannot run pnpm -v.
     echo         Close this window and run this launcher again.
     pause
     exit /b 1
 )
-
-:pnpm_ready
-for /f "tokens=1" %%a in ('pnpm -v 2^>nul') do set "PNPM_VER=%%a"
-echo [OK] pnpm found: v!PNPM_VER!
 echo.
+exit /b 0
+
+:verify_pnpm_runtime
+set "PNPM_VER="
+for /f "tokens=*" %%a in ('node -e "const cp=require('child_process'); const cmd=process.platform==='win32'?'pnpm.cmd':'pnpm'; const r=cp.spawnSync(cmd,['-v'],{encoding:'utf8',timeout:15000}); if (r.error) process.exit(1); if (r.status) process.exit(1); const out=String(r.stdout).trim(); if (out.length === 0) process.exit(1); console.log(out.split(/\r?\n/)[0]);" 2^>nul') do set "PNPM_VER=%%a"
+if not defined PNPM_VER exit /b 1
+echo [OK] pnpm found: v!PNPM_VER!
 exit /b 0
 
 :ensure_env
