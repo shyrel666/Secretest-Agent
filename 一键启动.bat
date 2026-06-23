@@ -3,6 +3,7 @@ chcp 65001 >nul 2>&1
 title Secretest Agent Launcher
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
+set "MIN_NODE_MAJOR=20"
 
 echo ============================================================
 echo   Secretest Agent Launcher
@@ -39,13 +40,21 @@ exit /b 0
 :ensure_node
 where node >nul 2>&1
 if not errorlevel 1 (
-    for /f "tokens=*" %%a in ('node -v 2^>nul') do set "NODE_VER=%%a"
-    echo [OK] Node.js found: !NODE_VER!
+    call :verify_node_runtime
+    if not errorlevel 1 (
+        echo.
+        exit /b 0
+    )
+
+    echo [WARN] Existing Node.js is missing, broken, or below v!MIN_NODE_MAJOR!.
+    echo [INFO] Installing or upgrading Node.js LTS...
     echo.
-    exit /b 0
+    goto :install_node
 )
 
 echo [WARN] Node.js was not found. Installing Node.js LTS...
+
+:install_node
 where winget >nul 2>&1
 if not errorlevel 1 (
     echo [INFO] Installing Node.js LTS with winget...
@@ -53,9 +62,15 @@ if not errorlevel 1 (
     if not errorlevel 1 (
         call :refresh_path
         where node >nul 2>&1
-        if not errorlevel 1 goto :node_ready
+        if not errorlevel 1 (
+            call :verify_node_runtime
+            if not errorlevel 1 (
+                echo.
+                exit /b 0
+            )
+        )
     )
-    echo [WARN] winget installation did not finish cleanly. Trying MSI fallback...
+    echo [WARN] winget installation did not produce a usable Node.js environment. Trying MSI fallback...
 )
 
 set "NODE_LTS_VER="
@@ -88,9 +103,51 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-for /f "tokens=*" %%a in ('node -v 2^>nul') do set "NODE_VER=%%a"
-echo [OK] Node.js found: !NODE_VER!
+call :verify_node_runtime
+if errorlevel 1 (
+    echo [ERROR] Node.js installation did not create a usable v!MIN_NODE_MAJOR!+ environment.
+    echo         Close this window and run this launcher again, or install Node.js 20.x LTS manually.
+    pause
+    exit /b 1
+)
 echo.
+exit /b 0
+
+:verify_node_runtime
+set "NODE_VER="
+set "NODE_MAJOR="
+set "NPM_VER="
+for /f "tokens=*" %%a in ('node -v 2^>nul') do set "NODE_VER=%%a"
+for /f "tokens=*" %%a in ('node -p "process.versions.node.split('.')[0]" 2^>nul') do set "NODE_MAJOR=%%a"
+
+if not defined NODE_VER (
+    echo [WARN] Node.js command exists, but node -v failed.
+    exit /b 1
+)
+
+if not defined NODE_MAJOR (
+    echo [WARN] Node.js version could not be parsed: !NODE_VER!
+    exit /b 1
+)
+
+if !NODE_MAJOR! lss !MIN_NODE_MAJOR! (
+    echo [WARN] Node.js !NODE_VER! found, but v!MIN_NODE_MAJOR!+ is required.
+    exit /b 1
+)
+
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Node.js !NODE_VER! found, but npm was not found on PATH.
+    exit /b 1
+)
+
+for /f "tokens=*" %%a in ('npm -v 2^>nul') do set "NPM_VER=%%a"
+if not defined NPM_VER (
+    echo [WARN] npm command exists, but npm -v failed.
+    exit /b 1
+)
+
+echo [OK] Node.js found: !NODE_VER! (npm v!NPM_VER!)
 exit /b 0
 
 :ensure_vcredist

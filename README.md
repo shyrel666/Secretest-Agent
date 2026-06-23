@@ -56,7 +56,7 @@ Secretest Agent 是一个基于国标知识库和多 Agent 协作的代码安全
 脚本的自动检测与安装能力：
 
 - **管理员权限检测**：非管理员运行时提示右键「以管理员身份运行」，可选择继续或退出
-- **Node.js**：优先通过 `winget` 安装，备用方案为动态获取最新 LTS 版本下载 msi 静默安装
+- **Node.js**：检查 `node`、主版本（需 20+）和 `npm` 是否可用；缺失、损坏或版本过低时优先通过 `winget` 安装/升级，备用方案为动态获取最新 LTS 版本下载 msi 静默安装
 - **VC++ 运行库**：通过 `winget` 安装（`better-sqlite3` / `sqlite-vec` 依赖）
 - **pnpm**：优先通过 Corepack 激活 `pnpm@9.0.0`，失败时回退到 `npm install -g pnpm@9`，并刷新当前窗口的 PATH
 - **端口冲突检测**：自动读取 `.env.local` 中的 `PORT`，检测端口占用并提示占用进程

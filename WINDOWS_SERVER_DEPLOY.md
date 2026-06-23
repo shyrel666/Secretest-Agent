@@ -33,7 +33,7 @@
 脚本会自动处理：
 
 1. **管理员权限检测** → 非管理员运行时提示右键「以管理员身份运行」，可选择继续或退出
-2. 未安装 Node.js → 通过 `winget` 安装，或动态获取最新 LTS 版本下载 msi 静默安装
+2. Node.js 缺失、损坏或低于 20 → 通过 `winget` 安装/升级，或动态获取最新 LTS 版本下载 msi 静默安装；同时检查 `npm` 是否可用
 3. 未安装 VC++ 运行库 → 通过 `winget` 自动安装
 4. 未安装 pnpm → 优先通过 Corepack 激活 `pnpm@9.0.0`，失败时回退到 `npm install -g pnpm@9`，并刷新当前窗口 PATH
 5. 未生成 `.env.local` → 从 `.env.example` 复制并提示编辑
