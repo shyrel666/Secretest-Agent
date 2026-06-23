@@ -58,10 +58,12 @@ Secretest Agent 是一个基于国标知识库和多 Agent 协作的代码安全
 - **管理员权限检测**：非管理员运行时提示右键「以管理员身份运行」，可选择继续或退出
 - **Node.js**：优先通过 `winget` 安装，备用方案为动态获取最新 LTS 版本下载 msi 静默安装
 - **VC++ 运行库**：通过 `winget` 安装（`better-sqlite3` / `sqlite-vec` 依赖）
-- **pnpm**：通过 `npm install -g pnpm@9` 安装（锁定 v9 主版本）
+- **pnpm**：优先通过 Corepack 激活 `pnpm@9.0.0`，失败时回退到 `npm install -g pnpm@9`，并刷新当前窗口的 PATH
 - **端口冲突检测**：自动读取 `.env.local` 中的 `PORT`，检测端口占用并提示占用进程
 - **项目依赖**：`pnpm install`
 - **构建**：`pnpm build`（首次自动执行，后续检测到构建产物则跳过）
+
+> 为兼容全新 Windows 电脑和 `cmd.exe` 默认代码页，启动脚本的控制台输出采用 ASCII/英文，避免双击时出现乱码。
 
 > 首次启动时，脚本会自动生成 `.env.local`，如需局域网访问可弹出编辑器设置 `HOSTNAME=0.0.0.0`。
 
@@ -133,6 +135,8 @@ pnpm start
 ```text
 data/knowledge/knowledge.db
 ```
+
+该内置数据库已包含 Java（GB/T 34944-2017）、C/C++（GB/T 34943-2017）和 C#（GB/T 34946-2017）三类标准。知识库写入后会主动执行 SQLite WAL checkpoint，确保提交到 Git 的 `knowledge.db` 主文件本身就是完整数据，不依赖被忽略的 `knowledge.db-wal`。
 
 
 ## 局域网访问

@@ -35,11 +35,13 @@
 1. **管理员权限检测** → 非管理员运行时提示右键「以管理员身份运行」，可选择继续或退出
 2. 未安装 Node.js → 通过 `winget` 安装，或动态获取最新 LTS 版本下载 msi 静默安装
 3. 未安装 VC++ 运行库 → 通过 `winget` 自动安装
-4. 未安装 pnpm → 通过 `npm install -g pnpm@9` 安装（锁定 v9 主版本）
+4. 未安装 pnpm → 优先通过 Corepack 激活 `pnpm@9.0.0`，失败时回退到 `npm install -g pnpm@9`，并刷新当前窗口 PATH
 5. 未生成 `.env.local` → 从 `.env.example` 复制并提示编辑
 6. 端口冲突检测 → 自动读取 `.env.local` 中的 `PORT`，检测端口占用并提示占用进程
 7. 未构建（`dist/server.js` 不存在）→ 自动 `pnpm install` + `pnpm build`
 8. 已构建 → 直接 `pnpm start`
+
+> 为避免全新 Windows / Windows Server 环境中 `cmd.exe` 代码页导致开头乱码，脚本窗口中的提示文案使用 ASCII/英文输出。
 
 > 如果你需要更精细的控制（如指定 Node.js 版本、手动配置 NSSM 服务），请参考下面的手动部署章节。
 

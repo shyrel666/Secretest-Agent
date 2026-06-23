@@ -14,6 +14,7 @@ import path from 'path';
 import fs from 'fs';
 import { buildFtsQuery } from './chinese-tokenizer';
 import { getRetrievalConfig, resolveSqlFetchLimit } from './retrieval-config';
+import { checkpointWal } from './sqlite-wal';
 
 // ——— 类型定义 ———
 
@@ -216,6 +217,7 @@ export function addDocument(
   });
 
   txn();
+  checkpointWal(db);
 }
 
 /**
@@ -276,7 +278,12 @@ export function deleteDocument(
     return result.changes > 0;
   });
 
-  return txn();
+  const deleted = txn();
+  if (deleted) {
+    checkpointWal(db);
+  }
+
+  return deleted;
 }
 
 // ——— 搜索操作 ———
