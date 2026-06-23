@@ -94,6 +94,7 @@ export interface AuditStage {
   id: string;
   label: string;
   status: 'pending' | 'active' | 'done';
+  loggedAt?: number;
 }
 
 export function resolvePipelineIndex(stages: AuditStage[]): number {

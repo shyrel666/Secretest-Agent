@@ -5,6 +5,8 @@ import { persist } from 'zustand/middleware';
 
 export const AI_CONFIG_STORAGE_KEY = 'ai-config-storage';
 
+export const BAILIAN_OPENAI_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
 // 支持的模型列表
 export const AVAILABLE_MODELS = [
   // 阿里百炼（通义千问）
@@ -156,7 +158,7 @@ const defaultModelConfig: ModelConfig = {
 
 export const defaultConnectionConfig: ConnectionConfig = {
   apiKey: '',
-  modelBaseUrl: '',
+  modelBaseUrl: BAILIAN_OPENAI_BASE_URL,
 };
 
 export const defaultAssessmentGenerationConfig: AssessmentGenerationConfig = {

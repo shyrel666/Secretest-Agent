@@ -4,6 +4,13 @@ import type { ModelConfig } from '@/lib/agents/types';
 import { toLLMConfig, DEFAULT_CONFIG } from '@/lib/agents/types';
 import { createEstimatedUsage } from '@/lib/token-usage';
 import { InternalMcpToolbox } from '@/lib/knowledge/mcp-tools';
+import {
+  buildCitationAppendix,
+  EMPTY_AUDIT_RESPONSE_MESSAGE,
+  hasVisibleAuditReportContent,
+  shouldAppendCitationAppendix,
+  type AuditCitation,
+} from '@/lib/audit/audit-report';
 
 const AUDIT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -26,22 +33,6 @@ function buildKnowledgeContext(
   });
 
   return `\n\n## 📚 国标知识库参考（以下内容检索自知识库，请优先引用）\n\n${sections.join('\n\n')}`;
-}
-
-function buildCitationAppendix(citations: Array<{
-  standardName?: string;
-  clauseNumber?: string;
-  sectionPath?: string;
-}>): string {
-  if (citations.length === 0) {
-    return '';
-  }
-
-  const lines = citations
-    .slice(0, 8)
-    .map((citation) => `- ${citation.standardName || '国标条款'} ${citation.clauseNumber || ''}${citation.sectionPath ? ` (${citation.sectionPath})` : ''}`.trim());
-
-  return `\n\n### 📎 证据引用补充\n${lines.join('\n')}`;
 }
 
 const BASE_SYSTEM_PROMPT = `你是一位专业的代码安全审计专家，精通GB/T 34944-2017《Java语言源代码漏洞测试规范》、GB/T 34943-2017《C/C++语言源代码漏洞测试规范》和GB/T 34946-2017《C#语言源代码漏洞测试规范》。
@@ -256,7 +247,17 @@ export async function POST(request: NextRequest) {
 
           emitStage('generate_done', '漏洞分析完成');
 
-          if (evidence.citations.length > 0 && !/GB\/T\s*\d{4,5}-\d{4}\s+[\d.]+/i.test(fullContent)) {
+          if (!hasVisibleAuditReportContent(fullContent)) {
+            safeEnqueue({
+              type: 'error',
+              error: EMPTY_AUDIT_RESPONSE_MESSAGE,
+              retryable: true,
+            });
+            safeClose();
+            return;
+          }
+
+          if (shouldAppendCitationAppendix(fullContent, evidence.citations as AuditCitation[])) {
             const appendix = buildCitationAppendix(evidence.citations);
             if (appendix) {
               fullContent += appendix;

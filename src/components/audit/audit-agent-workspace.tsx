@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { formatAgentElapsed } from '@/lib/format-agent-elapsed';
+import { getAuditElapsedMs } from '@/lib/store/audit-session';
 import { cn } from '@/lib/utils';
 import {
   AUDIT_CODE_EXAMPLES,
@@ -62,7 +63,8 @@ export interface AuditAgentWorkspaceProps {
   severitySummary: { overall: SeverityKey | null; detected: Set<SeverityKey> };
   copiedId: string | null;
   onCopyReport: () => void;
-  auditStartTime: number | null;
+  auditStartedAt: number | null;
+  auditFinishedAt: number | null;
   activeFileName: string;
 }
 
@@ -97,11 +99,11 @@ export function AuditAgentWorkspace({
   severitySummary,
   copiedId,
   onCopyReport,
-  auditStartTime,
+  auditStartedAt,
+  auditFinishedAt,
   activeFileName,
 }: AuditAgentWorkspaceProps) {
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const consoleRef = useRef<HTMLDivElement>(null);
   const reportRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -122,35 +124,27 @@ export function AuditAgentWorkspace({
   }, [isLoading, stages]);
 
   useEffect(() => {
-    if (auditStartTime == null) {
-      setElapsedMs(0);
+    if (auditStartedAt == null || auditFinishedAt != null) {
       return;
     }
-    const tick = () => setElapsedMs(Date.now() - auditStartTime);
-    tick();
-    const id = window.setInterval(tick, 100);
-    return () => window.clearInterval(id);
-  }, [auditStartTime]);
 
-  useEffect(() => {
-    for (const stage of stages) {
-      const agent = resolveActiveAgent(stage.id);
+    const id = window.setInterval(() => setNowMs(Date.now()), 100);
+    return () => window.clearInterval(id);
+  }, [auditStartedAt, auditFinishedAt]);
+
+  const logEntries = useMemo<LogEntry[]>(() => {
+    return stages.slice(-41).map((stage, index) => {
       const message = stage.label.trim();
       const key = `${stage.id}::${message}::${stage.status}`;
-      setLogEntries((prev) => {
-        if (prev.some((e) => e.key === key)) return prev;
-        return [
-          ...prev.slice(-40),
-          {
-            id: `${Date.now()}-${prev.length}`,
-            key,
-            time: formatLogTime(new Date()),
-            agent,
-            message,
-          },
-        ];
-      });
-    }
+
+      return {
+        id: `${stage.id}-${index}`,
+        key,
+        time: stage.loggedAt == null ? '' : formatLogTime(new Date(stage.loggedAt)),
+        agent: resolveActiveAgent(stage.id),
+        message,
+      };
+    });
   }, [stages]);
 
   useEffect(() => {
@@ -163,6 +157,7 @@ export function AuditAgentWorkspace({
     if (node && (hasReport || isLoading)) node.scrollTop = node.scrollHeight;
   }, [reportContent, hasReport, isLoading]);
 
+  const elapsedMs = getAuditElapsedMs(auditStartedAt, auditFinishedAt, nowMs);
   const elapsedLabel = formatAgentElapsed(elapsedMs);
   const canSend = input.trim().length > 0 && !isLoading;
 
@@ -196,7 +191,7 @@ export function AuditAgentWorkspace({
               <span className="rounded-lg border border-border/60 bg-background/60 px-2.5 py-1 text-muted-foreground">
                 GB/T 34944 · 34943 · 34946
               </span>
-              {(isLoading || auditStartTime != null) && (
+              {(isLoading || auditStartedAt != null) && (
                 <span className="agent-workspace-timer rounded-lg border border-primary/25 bg-primary/10 px-2.5 py-1 tabular-nums text-primary">
                   {elapsedLabel}
                 </span>

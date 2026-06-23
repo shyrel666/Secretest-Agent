@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import { AuditAgentWorkspace } from '@/components/audit/audit-agent-workspace';
 import {
   AUDIT_EXAMPLE_NAMES,
   extractSeveritySummary,
-  type AuditStage,
 } from '@/components/audit/audit-utils';
+import { AUDIT_DEFAULT_FILE_NAME, useAuditSessionStore } from '@/lib/store/audit-session';
 import { getModelDisplayName, useAIConfigStore } from '@/lib/store/ai-config';
 import { useTokenUsageStore } from '@/lib/store/token-usage';
 
@@ -22,13 +22,14 @@ const STAGE_META: Record<string, string> = {
 };
 
 export default function AuditPage() {
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [stages, setStages] = useState<AuditStage[]>([]);
-  const [reportContent, setReportContent] = useState('');
-  const [auditStartTime, setAuditStartTime] = useState<number | null>(null);
-  const [activeFileName, setActiveFileName] = useState('untitled.src');
+  const input = useAuditSessionStore((state) => state.input);
+  const isLoading = useAuditSessionStore((state) => state.isLoading);
+  const copiedId = useAuditSessionStore((state) => state.copiedId);
+  const stages = useAuditSessionStore((state) => state.stages);
+  const reportContent = useAuditSessionStore((state) => state.reportContent);
+  const auditStartedAt = useAuditSessionStore((state) => state.auditStartedAt);
+  const auditFinishedAt = useAuditSessionStore((state) => state.auditFinishedAt);
+  const activeFileName = useAuditSessionStore((state) => state.activeFileName);
   const { getAgentConfig } = useAIConfigStore();
   const addUsageRecord = useTokenUsageStore((state) => state.addRecord);
   const auditConfig = getAgentConfig('audit');
@@ -40,15 +41,16 @@ export default function AuditPage() {
   );
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    const session = useAuditSessionStore.getState();
+    if (!session.input.trim() || session.isLoading) return;
 
-    const code = input;
-    setIsLoading(true);
-    setStages([]);
-    setReportContent('');
-    setAuditStartTime(Date.now());
+    const code = session.input;
+    useAuditSessionStore.getState().startAudit();
 
-    const connectionConfig = useAIConfigStore.getState().getConnectionConfig();
+    const { getAgentConfig: getCurrentAgentConfig, getConnectionConfig } = useAIConfigStore.getState();
+    const currentAuditConfig = getCurrentAgentConfig('audit');
+    const currentModelLabel = getModelDisplayName(currentAuditConfig.model);
+    const connectionConfig = getConnectionConfig();
 
     try {
       const response = await fetch('/api/audit', {
@@ -57,7 +59,7 @@ export default function AuditPage() {
         body: JSON.stringify({
           code,
           history: [],
-          config: auditConfig,
+          config: currentAuditConfig,
           connectionConfig,
         }),
       });
@@ -83,54 +85,34 @@ export default function AuditPage() {
           try {
             const data = JSON.parse(line.slice(6));
             if (data.type === 'stage') {
-              setStages((prev) => {
-                const updated = prev.map((s) =>
-                  s.status === 'active' ? { ...s, status: 'done' as const } : s,
-                );
-                const isDone = data.stage === 'done' || data.stage?.endsWith('_done');
-                const existingIdx = updated.findIndex((s) => s.id === data.stage);
-                if (existingIdx !== -1) {
-                  updated[existingIdx] = {
-                    ...updated[existingIdx],
-                    status: isDone ? 'done' : 'active',
-                  };
-                  return updated;
-                }
-                return [
-                  ...updated,
-                  {
-                    id: data.stage,
-                    label: data.detail || STAGE_META[data.stage] || data.stage,
-                    status: isDone ? ('done' as const) : ('active' as const),
-                  },
-                ];
-              });
+              const stageId = typeof data.stage === 'string' ? data.stage : 'unknown';
+              const detail = typeof data.detail === 'string' ? data.detail : '';
+              useAuditSessionStore.getState().recordStage(
+                stageId,
+                detail || STAGE_META[stageId] || stageId,
+              );
             } else if (data.type === 'error') {
               const errorText =
                 typeof data.error === 'string'
                   ? data.error
                   : '抱歉，审计过程中出现错误。请稍后重试。';
-              setStages((prev) =>
-                prev.map((stage) => ({
-                  ...stage,
-                  status: stage.status === 'active' ? ('done' as const) : stage.status,
-                })),
-              );
-              setReportContent((prev) =>
-                prev.trim()
-                  ? `${prev}\n\n> ${errorText}`
+              useAuditSessionStore.getState().completeActiveStages();
+              const currentReport = useAuditSessionStore.getState().reportContent;
+              useAuditSessionStore.getState().setReportContent(
+                currentReport.trim()
+                  ? `${currentReport}\n\n> ${errorText}`
                   : `抱歉，审计过程中出现错误。\n\n${errorText}`,
               );
             } else if (data.type === 'usage' && data.usage) {
               addUsageRecord({
                 feature: 'audit',
                 action: '代码审计',
-                modelId: auditConfig.model,
-                modelLabel,
+                modelId: currentAuditConfig.model,
+                modelLabel: currentModelLabel,
                 ...data.usage,
               });
-            } else if (data.content) {
-              setReportContent((prev) => prev + data.content);
+            } else if (typeof data.content === 'string') {
+              useAuditSessionStore.getState().appendReportContent(data.content);
             }
           } catch {
             // 忽略解析错误
@@ -145,8 +127,8 @@ export default function AuditPage() {
             addUsageRecord({
               feature: 'audit',
               action: '代码审计',
-              modelId: auditConfig.model,
-              modelLabel,
+              modelId: currentAuditConfig.model,
+              modelLabel: currentModelLabel,
               ...data.usage,
             });
           }
@@ -156,38 +138,33 @@ export default function AuditPage() {
       }
     } catch (error) {
       console.error('审计错误:', error);
-      setReportContent('抱歉，审计过程中出现错误。请稍后重试。');
+      useAuditSessionStore.getState().setReportContent('抱歉，审计过程中出现错误。请稍后重试。');
     } finally {
-      setIsLoading(false);
+      useAuditSessionStore.getState().finishAudit();
     }
   };
 
   const handleExampleSelect = (code: string, name: string) => {
-    setInput(code);
-    setActiveFileName(name);
+    useAuditSessionStore.getState().setInput(code);
+    useAuditSessionStore.getState().setActiveFileName(name);
   };
 
   const handleInputChange = (value: string) => {
-    setInput(value);
+    useAuditSessionStore.getState().setInput(value);
     if (AUDIT_EXAMPLE_NAMES.has(activeFileName)) {
-      setActiveFileName('untitled.src');
+      useAuditSessionStore.getState().setActiveFileName(AUDIT_DEFAULT_FILE_NAME);
     }
   };
 
   const handleClear = () => {
-    setInput('');
-    setReportContent('');
-    setStages([]);
-    setCopiedId(null);
-    setAuditStartTime(null);
-    setActiveFileName('untitled.src');
+    useAuditSessionStore.getState().reset();
   };
 
   const handleCopyReport = async () => {
     if (!reportContent.trim()) return;
     await navigator.clipboard.writeText(reportContent);
-    setCopiedId('report');
-    setTimeout(() => setCopiedId(null), 2000);
+    useAuditSessionStore.getState().setCopiedId('report');
+    setTimeout(() => useAuditSessionStore.getState().setCopiedId(null), 2000);
   };
 
   return (
@@ -204,7 +181,8 @@ export default function AuditPage() {
       severitySummary={severitySummary}
       copiedId={copiedId}
       onCopyReport={handleCopyReport}
-      auditStartTime={auditStartTime}
+      auditStartedAt={auditStartedAt}
+      auditFinishedAt={auditFinishedAt}
       activeFileName={activeFileName}
     />
   );
