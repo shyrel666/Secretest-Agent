@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper SYSTEM "file:///D:/mybatis-3-mapper.dtd">
+<mapper namespace="org.itstec.report.mapper.ReportMapper">
+
+    <insert id="addRep" parameterType="org.itstec.report.entity.Report">
+    	INSERT INTO t_report 
+    	(dateTime, userId, bloodPressure, bloodSugar, bloodLipids, teacherID)
+    	VALUES
+    	(#{year}, #{term}, #{userId}, #{bloodPressure}, #{bloodSugar}, #{bloodLipids}, #{doctorId})
+    </insert>
+    
+   	<update id="updateRep" flushCache="true">
+        UPDATE t_report
+        SET
+            ${subject} = #{sData}
+        WHERE dateTime = #{dateTime} 
+          and userId = #{userId} and doctorId = #{doctorId}
+    </update>
+   
+   <select id="queryRep" resultType="org.itstec.report.entity.Report" >
+       SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+       FROM t_report 
+       WHERE dateTime = #{dateTime}  and userId = #{userId}
+   </select>
+   
+   <select id="queryByUser" resultType="org.itstec.report.entity.Report" >
+       SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+       FROM t_report 
+       WHERE userId = #{userId}
+       order by dateTime
+   </select>
+   
+   <select id="queryRepByDoctor" resultType="org.itstec.report.entity.Report" >
+       SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+       FROM t_report 
+       WHERE dateTime = #{dateTime}
+         and userId = #{userId} and doctorId = #{doctorId}
+   </select>
+   
+    <select id="querySubjData" resultType="org.itstec.report.entity.Report">
+		SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+		FROM t_report
+		WHERE dateTime = #{dateTime} and doctorId = #{doctorId}
+		  and ${subject} ${condition} #{sData}
+	</select>
+	
+	<select id="queryCustOrder" resultType="org.itstec.report.entity.Report">
+		SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+		FROM t_report
+		WHERE dateTime = #{dateTime} and doctorId = #{doctorId}
+		  and ${subject} ${condition} #{sData}
+		${order}
+	</select>
+	
+	<select id="queryCountUser" resultType="org.itstec.report.entity.Report">
+		SELECT COUNT(userId)
+		FROM t_report
+		WHERE dateTime = #{dateTime} and doctorId = #{doctorId}
+		group by ${subject} > 0
+	</select>
+    
+	
+</mapper>

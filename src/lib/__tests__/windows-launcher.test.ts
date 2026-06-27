@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 function readLauncher(): string {
-  return readFileSync(join(process.cwd(), '一键启动.bat'), 'utf8');
+  return readFileSync(join(process.cwd(), '一键启动.bat'), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function readSection(content: string, startLabel: string, endLabel: string): string {
@@ -63,6 +63,10 @@ describe('Windows one-click launcher', () => {
     assert.ok(firstProbeIndex > stageIndex, 'pnpm stage message should appear before silent probes');
     assert.match(ensurePnpm, /:verify_pnpm_runtime/);
     assert.match(ensurePnpm, /spawnSync\(cmd,\['-v'\].*timeout:15000/);
+    // Node 18.20+/20.12+/22+ (CVE-2024-27980) blocks spawning .cmd without a
+    // shell, so the probe must use shell:true or every pnpm check fails with
+    // EINVAL even when pnpm is installed and working.
+    assert.match(ensurePnpm, /spawnSync\(cmd,\['-v'\].*shell:true/);
     assert.doesNotMatch(ensurePnpm, /\('pnpm -v 2\^>nul'\)/);
   });
 });

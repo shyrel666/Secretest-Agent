@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import type { Question } from './question-generator-agent';
 import { sanitizeQuestionCode } from './code-sanitizer';
+import {
+  isProjectAuditTaskType,
+  isProjectId,
+  type ProjectEvidenceStep,
+  type ProjectSourceRef,
+} from '@/lib/project-audit/types';
 
 const STANDARD_BY_LANGUAGE = {
   Java: 'GB/T 34944-2017',
@@ -13,6 +19,38 @@ const nonEmptyText = z.string().trim().min(1);
 const questionCode = z.string()
   .transform((code) => sanitizeQuestionCode(code))
   .pipe(z.string().trim().min(8, '代码示例过短'));
+
+const projectSourceRefSchema = z.object({
+  projectId: z.string().refine(isProjectId, '未知 sourceProject'),
+  path: nonEmptyText,
+  startLine: z.coerce.number().int().positive(),
+  endLine: z.coerce.number().int().positive(),
+  role: z.enum(['entry', 'controller', 'service', 'mapper', 'sink', 'config', 'utility', 'evidence', 'filter']),
+  symbol: z.string().optional(),
+}).strict();
+
+const projectEvidenceStepSchema = z.object({
+  label: nonEmptyText,
+  ref: projectSourceRefSchema,
+  summary: nonEmptyText,
+}).strict();
+
+const projectMetadataSchema = z.object({
+  sourceProject: z.string().refine(isProjectId, '未知 sourceProject'),
+  auditTaskType: z.string().refine(isProjectAuditTaskType, '未知 auditTaskType'),
+  findingSeedId: nonEmptyText,
+  variantOfFindingId: z.string().optional(),
+  sourceRefs: z.array(projectSourceRefSchema).min(1, '源码项目题必须提供至少 1 个 sourceRefs').default([]),
+  evidenceFlow: z.array(projectEvidenceStepSchema).default([]),
+}).strict().superRefine((meta, ctx) => {
+  if (meta.auditTaskType === 'variant' && !meta.variantOfFindingId) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['variantOfFindingId'],
+      message: '变体题必须提供 variantOfFindingId',
+    });
+  }
+});
 
 export const questionOutputSchema = z.object({
   id: nonEmptyText,
@@ -27,6 +65,12 @@ export const questionOutputSchema = z.object({
   standardReference: z.string()
     .trim()
     .regex(/^GB\/T\s*\d{4,5}-\d{4}\s+\d+(?:\.\d+)+$/, '标准引用必须为“GB/T xxxxx-xxxx x.x.x”格式'),
+  sourceProject: z.string().refine(isProjectId, '未知 sourceProject').optional(),
+  auditTaskType: z.string().refine(isProjectAuditTaskType, '未知 auditTaskType').optional(),
+  findingSeedId: z.string().optional(),
+  variantOfFindingId: z.string().optional(),
+  sourceRefs: z.array(projectSourceRefSchema).optional(),
+  evidenceFlow: z.array(projectEvidenceStepSchema).optional(),
 }).strict().superRefine((question, ctx) => {
   const uniqueOptions = new Set(question.options.map((option) => option.toLowerCase()));
   if (uniqueOptions.size !== question.options.length) {
@@ -44,6 +88,64 @@ export const questionOutputSchema = z.object({
       path: ['standardReference'],
       message: `${question.language} 题目必须引用 ${expectedStandard}`,
     });
+  }
+
+  const hasAnyProjectField = Boolean(
+    question.sourceProject
+    || question.auditTaskType
+    || question.findingSeedId
+    || (question.sourceRefs && question.sourceRefs.length > 0)
+    || (question.evidenceFlow && question.evidenceFlow.length > 0)
+    || question.variantOfFindingId,
+  );
+
+  if (hasAnyProjectField) {
+    if (!question.sourceProject) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sourceProject'],
+        message: '项目元数据不完整：缺少 sourceProject',
+      });
+    }
+    if (!question.auditTaskType) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['auditTaskType'],
+        message: '项目元数据不完整：缺少 auditTaskType',
+      });
+    }
+    if (!question.findingSeedId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['findingSeedId'],
+        message: '项目元数据不完整：缺少 findingSeedId',
+      });
+    }
+    if (!question.sourceRefs || question.sourceRefs.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sourceRefs'],
+        message: '项目元数据不完整：至少需要 1 个 sourceRefs',
+      });
+    }
+    // variant 题必须同时带 findingSeedId（与变体源一致）与 variantOfFindingId
+    if (question.auditTaskType === 'variant') {
+      if (!question.variantOfFindingId) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['variantOfFindingId'],
+          message: '变体题必须提供 variantOfFindingId',
+        });
+      } else if (question.findingSeedId && question.variantOfFindingId !== question.findingSeedId) {
+        // variantOfFindingId 应当指向与 findingSeedId 同一漏洞模式
+        // 这里只做基础一致性检查；详细 seed 存在性由 validator 二次校验
+        ctx.addIssue({
+          code: 'custom',
+          path: ['variantOfFindingId'],
+          message: 'variantOfFindingId 应与 findingSeedId 保持一致',
+        });
+      }
+    }
   }
 });
 

@@ -8,6 +8,15 @@ import { InternalMcpToolbox, type RetrievalTraceItem, type ToolCitation } from '
 import { parseQuestionOutput } from './output-schemas';
 import { sanitizeQuestionCode } from './code-sanitizer';
 import { validateStandardAlignedQuestion } from './standard-alignment-validator';
+import { validateProjectGroundedQuestion } from '@/lib/project-audit/project-grounding-validator';
+import { getProjectFindingSeed } from '@/lib/project-audit/source-code-findings';
+import type {
+  ProjectAuditTaskType,
+  ProjectEvidenceStep,
+  ProjectId,
+  ProjectSourceRef,
+} from '@/lib/project-audit/types';
+import { buildProjectQuestionContext, formatProjectContextForPrompt } from '@/lib/project-audit/project-context-builder';
 
 // 出题Agent的系统提示词
 const QUESTION_GENERATOR_PROMPT = `你是一位专业的代码安全审计出题专家，精通GB/T 34944-2017《Java语言源代码漏洞测试规范》、GB/T 34943-2017《C/C++语言源代码漏洞测试规范》以及GB/T 34946-2017《C#语言源代码漏洞测试规范》。
@@ -76,6 +85,12 @@ export interface Question {
   difficulty: 'easy' | 'medium' | 'hard';
   vulnerabilityType: string;
   standardReference: string;
+  sourceProject?: ProjectId;
+  auditTaskType?: ProjectAuditTaskType;
+  findingSeedId?: string;
+  variantOfFindingId?: string;
+  sourceRefs?: ProjectSourceRef[];
+  evidenceFlow?: ProjectEvidenceStep[];
 }
 
 export class QuestionGeneratorAgent {
@@ -104,6 +119,10 @@ export class QuestionGeneratorAgent {
     excludedVulnerabilityTypes?: string[];
     coveredVulnerabilityTypes?: string[];
     count?: number;
+    projectSeed?: {
+      seed: import('@/lib/project-audit/types').ProjectAuditFindingSeed;
+      taskType: import('@/lib/project-audit/types').ProjectAuditTaskType;
+    };
   }): Promise<{
     success: boolean;
     questions?: Question[];
@@ -118,6 +137,10 @@ export class QuestionGeneratorAgent {
   }> {
     try {
       const excludedTypes = params.excludedVulnerabilityTypes || [];
+      // 项目源码模式：漏洞类型由 seed 固定，不同 seed 可能共享同一类型（如多条 SQL 注入 seed）。
+      // 类型唯一性会误杀同类型但不同文件/不同业务的真实源码题，因此项目模式不做类型排除，
+      // 唯一性由 orchestrator 层按 seed id 保证。
+      const enforceVulnerabilityTypeExclusion = !params.projectSeed;
       const standardInventory = await this.toolbox.listUploadedStandards();
       const availableStandardTypes = standardInventory.standards.map((item) => item.type);
 
@@ -159,7 +182,7 @@ export class QuestionGeneratorAgent {
       });
 
       const knowledgeCandidates = toolSearch.results.filter((item) => (
-        !containsExcludedVulnerability(item.content, excludedTypes)
+        !enforceVulnerabilityTypeExclusion || !containsExcludedVulnerability(item.content, excludedTypes)
       ));
 
       if (knowledgeCandidates.length === 0) {
@@ -167,6 +190,24 @@ export class QuestionGeneratorAgent {
           success: false,
           error: '知识库中未找到可用于出题的相关标准内容，请先上传包含漏洞条款的内部文档',
         };
+      }
+
+      // 1.1 项目模式：用源码上下文替代/补充标准检索
+      // 如果源码全部读取失败，视为不可出题（避免 LLM 仅凭 evidenceFlow 编造代码）
+      let projectContext: ReturnType<typeof buildProjectQuestionContext> | null = null;
+      if (params.projectSeed) {
+        try {
+          projectContext = buildProjectQuestionContext(
+            params.projectSeed.seed,
+            params.projectSeed.taskType,
+            { tolerateReadErrors: true },
+          );
+        } catch (error) {
+          return {
+            success: false,
+            error: `项目源码读取失败：${(error as Error).message}`,
+          };
+        }
       }
 
       const knowledgeContext = selectKnowledgeContext(knowledgeCandidates, 6)
@@ -180,10 +221,14 @@ export class QuestionGeneratorAgent {
         .join('\n\n---\n\n');
 
       // 2. 使用LLM生成题目
+      const projectContextPrompt = projectContext
+        ? `\n\n## 源码项目上下文（必须基于此出题）\n${formatProjectContextForPrompt(projectContext)}\n\n## 源码项目模式额外约束\n1. 优先使用提供的真实源码片段，不能改变项目名、文件路径、方法名、关键调用链和危险 sink。\n2. 若题型为 variant，只能变更业务表述和局部变量，必须保留 seed 的漏洞模式、source -> processing -> sink 结构。\n3. question 必须让用户完成代码审计任务，而不是只问泛化漏洞名称。\n4. explanation 必须引用源码项目名、文件路径、方法名、关键代码证据和 GB/T 条款。\n5. 输出 JSON 中必须额外包含 sourceProject / auditTaskType / findingSeedId / sourceRefs / evidenceFlow 字段：\n   - sourceProject 必须是 ${projectContext.project.id}\n   - auditTaskType 必须是 ${projectContext.taskType}\n   - findingSeedId 必须是 ${projectContext.seed.id}\n   - 当 auditTaskType 是 variant 时，必须额外输出 variantOfFindingId，且值必须是 ${projectContext.seed.id}；非 variant 题可省略\n   - sourceRefs 必须是 seed.sourceRefs 的子集且非空\n   - evidenceFlow 沿用 seed.evidenceFlow（可保持原样）\n6. 标准引用必须使用 ${projectContext.seed.standardReference}，禁止替换。\n7. 正确答案必须基于源码中真实存在的危险调用或缺失控制，不要虚构文件或方法。\n`
+        : '';
+
       const messages = [
         { role: 'system' as const, content: QUESTION_GENERATOR_PROMPT },
-        { 
-          role: 'user' as const, 
+        {
+          role: 'user' as const,
           content: `请基于以下知识库内容生成${params.count || 1}道代码漏洞审计题目。
 
 要求：
@@ -201,7 +246,7 @@ ${params.targetClauseNumber ? `- 目标标准条款：${params.targetClauseNumbe
 - 禁止在代码变量名、函数名、字符串、类名中出现会泄露答案的词，例如 unsafe、vuln、risk、injection、漏洞、注入
 
 知识库内容：
-${knowledgeContext}
+${knowledgeContext}${projectContextPrompt}
 
 请直接输出JSON格式的题目${params.count && params.count > 1 ? '数组' : ''}，不要添加任何其他文字。`
         },
@@ -257,6 +302,20 @@ ${knowledgeContext}
         if (!alignment.success) {
           schemaIssues.push(`题目 ${index + 1}: ${alignment.issues.join('；')}`);
           continue;
+        }
+
+        // 项目源码题：补充 project grounding 校验
+        if (validation.question.sourceProject && validation.question.findingSeedId) {
+          const seed = getProjectFindingSeed(validation.question.findingSeedId);
+          const grounding = validateProjectGroundedQuestion(
+            validation.question,
+            seed || undefined,
+            { mode: validation.question.auditTaskType === 'variant' ? 'variant' : 'source' },
+          );
+          if (!grounding.success) {
+            schemaIssues.push(`题目 ${index + 1}: ${grounding.issues.join('；')}`);
+            continue;
+          }
         }
 
         if (params.targetClauseNumber && extractClauseNumber(validation.question.standardReference) !== params.targetClauseNumber) {
@@ -332,10 +391,13 @@ ${knowledgeContext}
       return {
         success: true,
         questions: validatedQuestions,
-        usage: createEstimatedUsage({
-          messages,
-          completionText: response.content,
-        }),
+        usage: sumTokenUsage([
+          toolSearch.usage,
+          createEstimatedUsage({
+            messages,
+            completionText: response.content,
+          }),
+        ]),
         citations: Array.from(citationsMap.values()),
         grounding: {
           grounded: true,
@@ -350,87 +412,6 @@ ${knowledgeContext}
         error: error instanceof Error ? error.message : '题目生成失败',
       };
     }
-  }
-
-  /**
-   * 基于特定漏洞类型生成题目
-   */
-  async generateByVulnerabilityType(vulnType: string): Promise<{
-    success: boolean;
-    question?: Question;
-    usage?: TokenUsage;
-    error?: string;
-  }> {
-    const result = await this.generateQuestion({
-      vulnerabilityType: vulnType,
-      excludedVulnerabilityTypes: [],
-      count: 1,
-    });
-
-    if (result.success && result.questions && result.questions.length > 0) {
-      return {
-        success: true,
-        question: result.questions[0],
-        usage: result.usage,
-      };
-    }
-
-    return {
-      success: false,
-      error: result.error,
-    };
-  }
-
-  /**
-   * 生成一套测评题目
-   */
-  async generateQuizSet(options: {
-    totalQuestions?: number;
-    language?: AssessmentLanguage;
-    difficultyDistribution?: { easy: number; medium: number; hard: number };
-  } = {}): Promise<{
-    success: boolean;
-    questions?: Question[];
-    usage?: TokenUsage;
-    error?: string;
-  }> {
-    const total = options.totalQuestions || 8;
-    const distribution = options.difficultyDistribution || {
-      easy: Math.round(total * 0.3),
-      medium: Math.round(total * 0.5),
-      hard: total - Math.round(total * 0.3) - Math.round(total * 0.5),
-    };
-
-    const allQuestions: Question[] = [];
-    const usages: TokenUsage[] = [];
-
-    // 生成不同难度的题目
-    for (const [difficulty, count] of Object.entries(distribution)) {
-      if (count > 0) {
-        const result = await this.generateQuestion({
-          language: options.language || 'mixed',
-          difficulty: difficulty as 'easy' | 'medium' | 'hard',
-          excludedVulnerabilityTypes: allQuestions.map((question) => question.vulnerabilityType),
-          count,
-        });
-
-        if (result.success && result.questions) {
-          allQuestions.push(...result.questions);
-          if (result.usage) {
-            usages.push(result.usage);
-          }
-        }
-      }
-    }
-
-    // 打乱顺序
-    const shuffled = allQuestions.sort(() => Math.random() - 0.5);
-
-    return {
-      success: true,
-      questions: shuffled.slice(0, total),
-      usage: sumTokenUsage(usages),
-    };
   }
 }
 
@@ -607,7 +588,10 @@ function containsExcludedVulnerability(content: string, excludedTypes: string[])
   const normalizedContent = normalizeVulnerabilityType(content);
   return excludedTypes.some((type) => {
     const normalizedType = normalizeVulnerabilityType(type);
-    return normalizedType.length > 0 && normalizedContent.includes(normalizedType);
+    // 精确相等而非子串 includes：知识片段归一化后整段文本很少正好等于类型名，
+    // 避免"SQL注入"误杀掉所有含"注入"二字的条款。类型唯一性由 seenTypes 在题目层面保证，
+    // 知识片段层面无需用模糊匹配二次拦截。
+    return normalizedType.length > 0 && normalizedContent === normalizedType;
   });
 }
 

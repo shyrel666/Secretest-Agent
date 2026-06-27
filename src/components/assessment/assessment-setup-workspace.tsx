@@ -25,6 +25,10 @@ interface AssessmentSetupWorkspaceProps {
   availableKnowledgeCount: number;
   focusTopicTitle?: string;
   focusVulnerabilityType?: string;
+  projectMode?: 'standard' | 'project';
+  projectTaskMode?: 'source' | 'variant' | 'mixed';
+  onProjectModeChange?: (mode: 'standard' | 'project') => void;
+  onProjectTaskModeChange?: (mode: 'source' | 'variant' | 'mixed') => void;
 }
 
 const LANGUAGE_OPTIONS: Array<{
@@ -76,6 +80,10 @@ export function AssessmentSetupWorkspace({
   availableKnowledgeCount,
   focusTopicTitle,
   focusVulnerabilityType,
+  projectMode = 'standard',
+  projectTaskMode = 'source',
+  onProjectModeChange,
+  onProjectTaskModeChange,
 }: AssessmentSetupWorkspaceProps) {
   const knowledgeProps = {
     hasJavaKnowledge,
@@ -85,12 +93,17 @@ export function AssessmentSetupWorkspace({
     availableKnowledgeCount,
   };
 
-  const canGenerate = availableKnowledgeCount > 0;
+  const isProjectModeSelected = projectMode === 'project';
+  const isProjectSourceOnlyLanguage = language === 'cpp' || language === 'csharp';
+  const isProjectModeActive = isProjectModeSelected && !isProjectSourceOnlyLanguage;
+  const canGenerate = isProjectModeSelected
+    ? language === 'java' && hasJavaKnowledge
+    : availableKnowledgeCount > 0;
 
   return (
     <div className="agent-workspace flex min-h-[calc(100dvh-4rem)] flex-col items-center justify-center px-4 py-6 sm:px-6 sm:py-8">
       <div className="mx-auto flex w-full max-w-[min(76rem,calc(100vw-4rem))] flex-col">
-        <div className="agent-workspace-panel flex h-[min(720px,calc(100dvh-11rem))] max-h-[calc(100dvh-11rem)] flex-col overflow-hidden rounded-xl border border-border/80 bg-card/90 shadow-2xl shadow-black/20 sm:rounded-2xl">
+        <div className="agent-workspace-panel flex h-[min(820px,calc(100dvh-9rem))] max-h-[calc(100dvh-9rem)] flex-col overflow-hidden rounded-xl border border-border/80 bg-card/90 shadow-2xl shadow-black/20 sm:rounded-2xl">
           <header className="flex flex-wrap items-center gap-3 border-b border-border/70 bg-muted/25 px-5 py-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-2" aria-hidden="true">
               <span className="h-3.5 w-3.5 rounded-full bg-rose-500/80 sm:h-4 sm:w-4" />
@@ -162,14 +175,6 @@ export function AssessmentSetupWorkspace({
               </div>
 
               <div className="min-h-0 flex-1 overflow-hidden px-5 py-4 sm:px-7 sm:py-5">
-                <div className="mb-4">
-                  <p className="mb-1 font-mono text-xs uppercase tracking-wider text-primary">config.language</p>
-                  <h2 className="text-xl font-semibold text-foreground sm:text-2xl">选择语言标准</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    基于知识库内容，由多 Agent 协作出题
-                  </p>
-                </div>
-
                 {focusTopicTitle ? (
                   <div className="mb-5 rounded-lg border border-primary/25 bg-primary/10 px-4 py-3 font-mono text-sm text-primary">
                     <span className="text-primary/70">focus </span>
@@ -180,7 +185,9 @@ export function AssessmentSetupWorkspace({
 
                 <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
                   {LANGUAGE_OPTIONS.map((option) => {
-                    const disabled = option.isDisabled(knowledgeProps);
+                    // 真实项目源码模式仅支持 Java 项目，禁用其余语言选项，避免选中后又被回退逻辑改回 Java。
+                    const disabledByProjectMode = isProjectModeSelected && option.value !== 'java';
+                    const disabled = disabledByProjectMode || option.isDisabled(knowledgeProps);
                     const selected = language === option.value;
 
                     return (
@@ -201,59 +208,135 @@ export function AssessmentSetupWorkspace({
                           {option.label}
                         </div>
                         <div className="mt-1 text-xs leading-snug text-muted-foreground">
-                          {option.getDesc(knowledgeProps)}
+                          {disabledByProjectMode ? '源码模式仅支持 Java' : option.getDesc(knowledgeProps)}
                         </div>
                       </button>
                     );
                   })}
                 </div>
 
-                {availableKnowledgeCount === 0 ? (
+                {isProjectModeSelected && !hasJavaKnowledge ? (
+                  <p className="mb-4 font-mono text-xs text-amber-400 sm:text-sm">
+                    warn: 真实项目源码题仍需先上传 Java 标准文档
+                  </p>
+                ) : availableKnowledgeCount === 0 ? (
                   <p className="mb-4 font-mono text-xs text-amber-400 sm:text-sm">
                     warn: 当前尚未上传任何标准文档，无法生成测评题
                   </p>
                 ) : null}
 
-                <div className="mb-4">
-                  <p className="mb-2 font-mono text-xs uppercase tracking-wider text-primary">config.count</p>
-                  <div className="flex flex-wrap gap-2">
-                    {QUESTION_COUNTS.map((count) => (
-                      <button
-                        key={count}
-                        type="button"
-                        onClick={() => onQuestionCountChange(count)}
-                        className={cn(
-                          'rounded-lg border px-4 py-2 font-mono text-sm transition-all sm:px-5 sm:py-2.5 sm:text-base',
-                          totalQuestions === count
-                            ? 'border-primary bg-primary text-primary-foreground'
-                            : 'border-border/70 bg-background/40 text-foreground hover:border-primary/40',
-                        )}
-                      >
-                        {count} 题
-                      </button>
-                    ))}
+                <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,auto)_minmax(0,1fr)] lg:items-end lg:gap-5">
+                  <div className="min-w-0">
+                    <p className="mb-2 font-mono text-xs uppercase tracking-wider text-primary">config.count</p>
+                    <div className="flex flex-wrap gap-2">
+                      {QUESTION_COUNTS.map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => onQuestionCountChange(count)}
+                          className={cn(
+                            'rounded-lg border px-3.5 py-2 font-mono text-sm transition-all sm:px-4 sm:py-2.5 sm:text-base whitespace-nowrap',
+                            totalQuestions === count
+                              ? 'border-primary bg-primary text-primary-foreground'
+                              : 'border-border/70 bg-background/40 text-foreground hover:border-primary/40',
+                          )}
+                        >
+                          {count} 题
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <div className="rounded-xl border border-border/50 bg-muted/20 p-3 sm:p-4">
-                  <div className="flex gap-3">
-                    <BookOpen className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
-                    <div className="min-w-0">
-                      <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">notes</p>
-                      <ul className="mt-1.5 space-y-1 text-sm leading-snug text-muted-foreground">
-                        <li>
-                          <span className="text-primary/60">›</span> AI 基于知识库检索并生成题目
-                        </li>
-                        <li>
-                          <span className="text-primary/60">›</span> QuestionGen 出题 · Reviewer 审核质量
-                        </li>
-                        <li>
-                          <span className="text-primary/60">›</span> 答错后可获得讲解与学习路径建议
-                        </li>
-                      </ul>
+                  <div className="min-w-0">
+                    <p className="mb-2 font-mono text-xs uppercase tracking-wider text-primary">config.projectMode</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { value: 'standard' as const, label: '标准知识库', desc: '基于上传的 GB/T 文档出题' },
+                        { value: 'project' as const, label: '真实项目源码', desc: 'YM_PT / itstec-24 漏洞点' },
+                      ].map((option) => {
+                        const disabled = option.value === 'project' && isProjectSourceOnlyLanguage;
+                        const selected = projectMode === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => onProjectModeChange?.(option.value)}
+                            disabled={disabled}
+                            className={cn(
+                              'rounded-lg border px-3 py-2 text-left transition-all',
+                              selected
+                                ? 'border-primary bg-primary/10 shadow-md shadow-primary/10'
+                                : 'border-border/70 bg-background/40 hover:border-primary/40',
+                              disabled && 'cursor-not-allowed opacity-45',
+                            )}
+                          >
+                            <div className="font-mono text-sm font-semibold text-foreground">{option.label}</div>
+                            <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+                              {disabled ? '当前源码项目仅支持 Java' : option.desc}
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
+
+                {isProjectModeActive ? (
+                  <div className="mb-4 space-y-3 rounded-xl border border-primary/25 bg-primary/5 p-3 sm:p-4">
+                    <div>
+                      <p className="mb-1.5 font-mono text-xs uppercase tracking-wider text-primary">config.projectTaskMode</p>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { value: 'source' as const, label: '真实源码', desc: '展示项目片段' },
+                          { value: 'mixed' as const, label: '混合', desc: '源码 + 变体' },
+                          { value: 'variant' as const, label: '变体', desc: '举一反三' },
+                        ].map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => onProjectTaskModeChange?.(option.value)}
+                            className={cn(
+                              'rounded-lg border px-3 py-2 text-left transition-all',
+                              projectTaskMode === option.value
+                                ? 'border-primary bg-primary/10'
+                                : 'border-border/70 bg-background/40 hover:border-primary/40',
+                            )}
+                          >
+                            <div className="font-mono text-sm font-semibold text-foreground">{option.label}</div>
+                            <div className="mt-1 text-[11px] leading-snug text-muted-foreground">{option.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {!isProjectModeActive ? (
+                  <div className="rounded-xl border border-border/50 bg-muted/20 p-3 sm:p-4">
+                    <div className="flex gap-3">
+                      <BookOpen className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                      <div className="min-w-0">
+                        <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">notes</p>
+                        <ul className="mt-1.5 space-y-1 text-sm leading-snug text-muted-foreground">
+                          <li>
+                            <span className="text-primary/60">›</span> AI 基于知识库检索并生成题目
+                          </li>
+                          <li>
+                            <span className="text-primary/60">›</span> QuestionGen 出题 · Reviewer 审核质量
+                          </li>
+                          <li>
+                            <span className="text-primary/60">›</span> 答错后可获得讲解与学习路径建议
+                          </li>
+                          {isProjectModeActive ? (
+                            <li>
+                              <span className="text-primary/60">›</span> 题目将基于 source_code/&lt;projectId&gt; 真实代码生成
+                            </li>
+                          ) : null}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               <div className="border-t border-border/50 px-5 py-4 sm:px-7 sm:py-5">

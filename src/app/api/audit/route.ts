@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { LLMClient, Config, HeaderUtils } from 'coze-coding-dev-sdk';
 import type { ModelConfig } from '@/lib/agents/types';
 import { toLLMConfig, DEFAULT_CONFIG } from '@/lib/agents/types';
-import { createEstimatedUsage } from '@/lib/token-usage';
+import { createEstimatedUsage, sumTokenUsage, type TokenUsage } from '@/lib/token-usage';
 import { InternalMcpToolbox } from '@/lib/knowledge/mcp-tools';
 import {
   buildCitationAppendix,
@@ -110,7 +110,37 @@ export async function POST(request: NextRequest) {
     const scope = toolbox.detectLanguageAndScope({ code });
     stageEvents.push({ stage: 'detect_done', detail: `识别为 ${scope.languageLabel} 代码` });
 
-    let evidence = {
+    let evidence: {
+      results: Array<{
+        content: string;
+        score: number;
+        docId: string;
+        sectionPath?: string;
+        clauseNumber?: string;
+        chunkType?: string;
+      }>;
+      citations: Array<{
+        docId: string;
+        standardType?: 'java' | 'cpp' | 'csharp';
+        standardName?: string;
+        clauseNumber?: string;
+        sectionPath?: string;
+      }>;
+      retrievalTrace: Array<{
+        tool: string;
+        summary: string;
+        query?: string;
+        hitCount: number;
+        citations: Array<{
+          docId: string;
+          standardType?: 'java' | 'cpp' | 'csharp';
+          standardName?: string;
+          clauseNumber?: string;
+          sectionPath?: string;
+        }>;
+      }>;
+      usage?: TokenUsage;
+    } = {
       results: [] as Array<{
         content: string;
         score: number;
@@ -139,6 +169,7 @@ export async function POST(request: NextRequest) {
           sectionPath?: string;
         }>;
       }>,
+      usage: undefined as TokenUsage | undefined,
     };
 
     if ((auditConnectionConfig?.apiKey || process.env.COZE_WORKLOAD_IDENTITY_API_KEY) && (auditConnectionConfig?.modelBaseUrl || process.env.COZE_INTEGRATION_MODEL_BASE_URL)) {
@@ -293,10 +324,13 @@ export async function POST(request: NextRequest) {
             return;
           }
 
-          const usage = createEstimatedUsage({
-            messages,
-            completionText: fullContent,
-          });
+          const usage = sumTokenUsage([
+            evidence.usage,
+            createEstimatedUsage({
+              messages,
+              completionText: fullContent,
+            }),
+          ]);
           safeEnqueue({ type: 'usage', usage });
           safeClose();
         } catch (error) {

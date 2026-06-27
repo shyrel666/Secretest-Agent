@@ -17,7 +17,7 @@ import { type DynamicLearningTopic, getLearningTopic } from '@/lib/learning/topi
 import { getModelDisplayName, useAIConfigStore } from '@/lib/store/ai-config';
 import { useLearningProgressStore } from '@/lib/store/learning-progress';
 import { getLanguageLabel } from '@/lib/standards';
-import { hasTokenUsage } from '@/lib/token-usage';
+import { shouldRecordTokenUsage } from '@/lib/token-usage';
 import { useTokenUsageStore } from '@/lib/store/token-usage';
 
 interface LessonSection {
@@ -31,6 +31,7 @@ interface LessonStreamPayload {
   usage?: TokenUsage | null;
   content?: string;
   qualityWarnings?: string[];
+  fromCache?: boolean;
 }
 
 interface LessonStageState {
@@ -293,7 +294,7 @@ export default function LearningTopicPage() {
             cacheLesson(topic.id, nextLessonDocument);
           }
 
-          if (!recordedUsage && payload.usage && hasTokenUsage(payload.usage)) {
+          if (!recordedUsage && shouldRecordTokenUsage(payload.usage, { fromCache: payload.fromCache })) {
             recordedUsage = true;
             addUsageRecord({
               feature: 'learning',
@@ -706,6 +707,7 @@ async function readSseStream(
             ? payload.references.filter((reference): reference is string => typeof reference === 'string')
             : undefined,
           usage: isTokenUsagePayload(payload.usage) ? payload.usage : undefined,
+          fromCache: typeof payload.fromCache === 'boolean' ? payload.fromCache : undefined,
           qualityWarnings: Array.isArray(payload.qualityWarnings)
             ? payload.qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
             : undefined,
@@ -721,6 +723,7 @@ async function readSseStream(
             ? payload.references.filter((reference): reference is string => typeof reference === 'string')
             : undefined,
           usage: isTokenUsagePayload(payload.usage) ? payload.usage : undefined,
+          fromCache: typeof payload.fromCache === 'boolean' ? payload.fromCache : undefined,
           qualityWarnings: Array.isArray(payload.qualityWarnings)
             ? payload.qualityWarnings.filter((warning): warning is string => typeof warning === 'string')
             : undefined,

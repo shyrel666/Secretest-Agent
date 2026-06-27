@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper SYSTEM "file:///D:/mybatis-3-mapper.dtd">
+<mapper namespace="org.itstec.doctor.mapper.DoctorMapper">
+
+    <insert id="regiest">
+    	INSERT INTO t_doctor 
+    	(id, account, docName, pwd)
+    	VALUES
+    	(#{id}, #{account}, #{name}, #{pwd})
+    </insert>
+    
+    <select id="show" resultType="org.itstec.doctor.entity.Doctor">
+		SELECT id, account, docName, docPhone, docAddress 
+		FROM t_doctor
+		WHERE account = #{account}
+	</select>
+	
+	<select id="login" resultType="org.itstec.doctor.entity.Doctor">
+		SELECT id, account, teacherName, teacherPhone, teacherAddress 
+		FROM t_doctor
+		WHERE account = #{account} and pwd = #{pwd}
+	</select>
+	
+	<update id="updateInfo" parameterType="org.itstec.doctor.entity.Doctor" flushCache="true" >
+        UPDATE t_doctor
+        SET
+            docPhone = #{docPhone},
+            docAddress = #{docAddress}
+        WHERE account = #{account}
+    </update>
+    
+    <update id="updatePwd" flushCache="true" >
+        UPDATE t_doctor
+        SET pwd = #{newPwd}
+        WHERE account = #{account} and pwd = #{pwd}
+    </update>
+    
+    <select id="queryUserList" resultType="org.itstec.user.entity.User">
+		SELECT userId, userName, userPhone, userAddress 
+		FROM t_user
+		WHERE doctorId = #{account} 
+	</select>
+	
+	<select id="queryUserReport" resultType="org.itstec.report.entity.Report">
+		SELECT id, dateTime, userId, bloodPressure, bloodSugar, bloodLipids, doctorId
+		FROM t_report
+		WHERE userId = #{userId} 
+	</select>
+	
+</mapper>

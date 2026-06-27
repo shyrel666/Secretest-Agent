@@ -107,12 +107,27 @@ export function hasTokenUsage(usage?: TokenUsage | null): boolean {
   return Boolean(usage && usage.totalTokens > 0);
 }
 
+export function shouldRecordTokenUsage(
+  usage?: TokenUsage | null,
+  options: { fromCache?: boolean } = {},
+): usage is TokenUsage {
+  return !options.fromCache && hasTokenUsage(usage);
+}
+
 function padDatePart(value: number): string {
   return value.toString().padStart(2, '0');
 }
 
+function isLocalDateKey(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
 export function getLocalDateKey(value: Date | string): string {
-  const date = typeof value === 'string' ? new Date(value) : value;
+  const date = typeof value === 'string'
+    ? isLocalDateKey(value)
+      ? parseLocalDateKey(value)
+      : new Date(value)
+    : value;
 
   return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
 }
@@ -123,7 +138,7 @@ export function parseLocalDateKey(dateKey: string): Date {
   return new Date(year, (month || 1) - 1, day || 1);
 }
 
-export function formatUsageDateLabel(dateKey: string, referenceDate: Date = new Date()): string {
+export function formatUsageDateLabel(dateKey: string, referenceDate: Date | string = new Date()): string {
   const referenceKey = getLocalDateKey(referenceDate);
 
   if (dateKey === referenceKey) {
@@ -143,7 +158,11 @@ export function formatUsageDateShortLabel(dateKey: string): string {
 }
 
 export function getStartOfWeek(value: Date | string, weekStartsOn: 0 | 1 = 1): Date {
-  const rawDate = typeof value === 'string' ? new Date(value) : value;
+  const rawDate = typeof value === 'string'
+    ? isLocalDateKey(value)
+      ? parseLocalDateKey(value)
+      : new Date(value)
+    : value;
   const date = new Date(rawDate.getFullYear(), rawDate.getMonth(), rawDate.getDate());
   const day = date.getDay();
   const diff = (day - weekStartsOn + 7) % 7;
@@ -179,9 +198,14 @@ export function formatWeekRangeLabel(value: Date | string, weekStartsOn: 0 | 1 =
   return `${startLabel} - ${endLabel}`;
 }
 
-export function getRecentDateKeys(days: number, referenceDate: Date = new Date()): string[] {
+export function getRecentDateKeys(days: number, referenceDate: Date | string = new Date()): string[] {
   const keys: string[] = [];
-  const anchor = new Date(referenceDate.getFullYear(), referenceDate.getMonth(), referenceDate.getDate());
+  const rawDate = typeof referenceDate === 'string'
+    ? isLocalDateKey(referenceDate)
+      ? parseLocalDateKey(referenceDate)
+      : new Date(referenceDate)
+    : referenceDate;
+  const anchor = new Date(rawDate.getFullYear(), rawDate.getMonth(), rawDate.getDate());
 
   for (let offset = days - 1; offset >= 0; offset -= 1) {
     const date = new Date(anchor);
@@ -199,7 +223,7 @@ export function getRecordsForDate(records: TokenUsageRecord[], dateKey: string):
 export function aggregateTokenUsageByDateKeys(
   records: TokenUsageRecord[],
   dateKeys: string[],
-  referenceDate: Date = new Date(),
+  referenceDate: Date | string = new Date(),
 ): TokenUsageDaySummary[] {
   const dailyTotals = new Map<string, TokenUsageDaySummary>();
 
@@ -245,14 +269,14 @@ export function aggregateTokenUsageByDateKeys(
 export function aggregateTokenUsageByDay(
   records: TokenUsageRecord[],
   days: number,
-  referenceDate: Date = new Date(),
+  referenceDate: Date | string = new Date(),
 ): TokenUsageDaySummary[] {
   return aggregateTokenUsageByDateKeys(records, getRecentDateKeys(days, referenceDate), referenceDate);
 }
 
 export function aggregateTokenUsageByWeek(
   records: TokenUsageRecord[],
-  referenceDate: Date = new Date(),
+  referenceDate: Date | string = new Date(),
   weekStartsOn: 0 | 1 = 1,
 ): TokenUsageDaySummary[] {
   return aggregateTokenUsageByDateKeys(records, getWeekDateKeys(referenceDate, weekStartsOn), referenceDate);

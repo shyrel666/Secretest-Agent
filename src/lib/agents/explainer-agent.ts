@@ -9,7 +9,7 @@ import {
   type LessonPracticeQuestion,
 } from '@/lib/learning/lesson-document';
 import { getLanguageLabel } from '@/lib/standards';
-import { createEstimatedUsage, type TokenUsage } from '@/lib/token-usage';
+import { createEstimatedUsage, sumTokenUsage, type TokenUsage } from '@/lib/token-usage';
 import type { SearchResultItem } from '@/lib/knowledge';
 import { InternalMcpToolbox, type RetrievalTraceItem, type ToolCitation } from '@/lib/knowledge/mcp-tools';
 import {
@@ -614,8 +614,15 @@ export class ExplainerAgent {
       }
 
       // 2. 生成讲解内容
+      const projectMetadata = params.question.sourceProject
+        ? `**源码项目**：${params.question.sourceProject}${params.question.auditTaskType ? ` / 任务类型：${params.question.auditTaskType}` : ''}${params.question.findingSeedId ? ` / findingSeedId：${params.question.findingSeedId}` : ''}\n${params.question.sourceRefs && params.question.sourceRefs.length > 0 ? `**代码证据**:\n${params.question.sourceRefs.map((ref) => `- ${ref.path}:L${ref.startLine}-${ref.endLine}${ref.symbol ? ` (${ref.symbol})` : ''}`).join('\n')}\n` : ''}${params.question.evidenceFlow && params.question.evidenceFlow.length > 0 ? `**证据流**:\n${params.question.evidenceFlow.map((step, index) => `${index + 1}. [${step.label}] ${step.ref.path}:L${step.ref.startLine}-${step.ref.endLine} — ${step.summary}`).join('\n')}\n` : ''}`
+        : '';
+      const projectConstraint = params.question.sourceProject
+        ? '\n\n## 源码项目模式额外要求\n- 解析必须显式提到项目名、文件路径、方法名、关键代码证据和 GB/T 条款，让用户学会如何从真实项目代码中追踪漏洞；不能只复述标准条款。\n- 修复方案要落到具体文件/方法，而不是泛化建议。'
+        : '';
+
       const messages = [
-        { role: 'system' as const, content: EXPLAINER_PROMPT },
+        { role: 'system' as const, content: EXPLAINER_PROMPT + projectConstraint },
         {
           role: 'user' as const,
           content: `请讲解以下代码漏洞审计题目：
@@ -626,6 +633,7 @@ export class ExplainerAgent {
 **漏洞类型**：${params.question.vulnerabilityType}
 **难度**：${params.question.difficulty}
 **标准引用**：${params.question.standardReference}
+${projectMetadata}
 
 ## 代码示例
 
@@ -717,10 +725,13 @@ ${params.isCorrect
           relatedVulnerabilities: extractRelated(content),
           practiceSuggestions: extractPractices(content),
         },
-        usage: createEstimatedUsage({
-          messages,
-          completionText: response.content,
-        }),
+        usage: sumTokenUsage([
+          evidence.usage,
+          createEstimatedUsage({
+            messages,
+            completionText: response.content,
+          }),
+        ]),
         citations: grounding.citations,
         grounding: {
           grounded: grounding.grounded,
@@ -740,6 +751,7 @@ ${params.isCorrect
     results: SearchResultItem[];
     citations: ToolCitation[];
     retrievalTrace: RetrievalTraceItem[];
+    usage?: TokenUsage;
   }> {
     const scope = this.toolbox.detectLanguageAndScope({
       language: question.language,
@@ -783,6 +795,7 @@ ${params.isCorrect
         ...(clauseContext?.retrievalTrace || []),
         ...searchResult.retrievalTrace,
       ],
+      usage: searchResult.usage,
     };
   }
 
@@ -952,10 +965,13 @@ ${knowledgeContext}
           lessonDocument: cloneLessonDocument(response.lessonDocument),
           references: Array.from(new Set(selectedResults.map((item) => item.docId))),
         },
-        usage: createEstimatedUsage({
-          messages,
-          completionText: response.rawContent,
-        }),
+        usage: sumTokenUsage([
+          searchResult.usage,
+          createEstimatedUsage({
+            messages,
+            completionText: response.rawContent,
+          }),
+        ]),
         citations: grounding.citations,
         grounding: {
           grounded: grounding.grounded,
@@ -1104,10 +1120,13 @@ ${knowledgeContext}
           lessonDocument: cloneLessonDocument(response.lessonDocument),
           references: Array.from(new Set(selectedResults.map((item) => item.docId))),
         },
-        usage: createEstimatedUsage({
-          messages,
-          completionText: response.rawContent,
-        }),
+        usage: sumTokenUsage([
+          searchResult.usage,
+          createEstimatedUsage({
+            messages,
+            completionText: response.rawContent,
+          }),
+        ]),
         qualityWarnings: response.qualityWarnings.length > 0
           ? response.qualityWarnings
           : undefined,

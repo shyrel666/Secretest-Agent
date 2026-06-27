@@ -12,6 +12,14 @@ import type { RetrievalTraceItem, ToolCitation } from '@/lib/knowledge/mcp-tools
 import { shuffleQuestionOptions } from '@/lib/question-option-randomizer';
 import { getDocumentSections, isReadableKnowledgeTitle } from '@/lib/knowledge';
 import { buildSeedPlan, getDifficultyForIndex } from './seed-plan';
+import { buildProjectSeedPlan } from '@/lib/project-audit/project-seed-plan';
+import {
+  isProjectMode,
+  isSourceProjectSelection,
+  type ProjectMode,
+  type ProjectSeedPlanEntry,
+  type SourceProjectSelection,
+} from '@/lib/project-audit/types';
 
 // Agent配置集合
 export interface AgentsConfig {
@@ -27,6 +35,7 @@ export interface AssessmentGenerationOptions {
 }
 
 type ReviewAndFixResult = Awaited<ReturnType<ReviewerAgent['reviewAndFix']>>;
+type QuestionGenResult = Awaited<ReturnType<QuestionGeneratorAgent['generateQuestion']>>;
 
 interface CoverageTarget {
   standardType: StandardType;
@@ -34,11 +43,72 @@ interface CoverageTarget {
   clauseNumber: string;
 }
 
+interface QuizSeedEntry {
+  difficulty: 'easy' | 'medium' | 'hard';
+  count: 1;
+  target?: CoverageTarget;
+  projectSeed?: ProjectSeedPlanEntry;
+}
+
 interface LearningPath {
   strengths: string[];
   weaknesses: string[];
   recommendations: string[];
   nextTopics: string[];
+}
+
+export interface ProjectQuizModeResolution {
+  success: boolean;
+  isProjectModeActive: boolean;
+  sourceProject?: SourceProjectSelection;
+  projectMode: ProjectMode;
+  error?: string;
+}
+
+export function resolveProjectQuizMode(params: {
+  sourceProject?: unknown;
+  projectMode?: unknown;
+  language?: AssessmentLanguage;
+}): ProjectQuizModeResolution {
+  const sourceProjectProvided = params.sourceProject !== undefined;
+
+  if (sourceProjectProvided && !isSourceProjectSelection(params.sourceProject)) {
+    return {
+      success: false,
+      isProjectModeActive: false,
+      projectMode: 'source',
+      error: `未知 sourceProject: ${String(params.sourceProject)}`,
+    };
+  }
+
+  if (params.projectMode !== undefined && !isProjectMode(params.projectMode)) {
+    return {
+      success: false,
+      isProjectModeActive: false,
+      projectMode: 'source',
+      error: `未知 projectMode: ${String(params.projectMode)}`,
+    };
+  }
+
+  const languageSupportsProjectMode = params.language === undefined
+    || params.language === 'java'
+    || params.language === 'mixed';
+
+  if (sourceProjectProvided && !languageSupportsProjectMode) {
+    return {
+      success: false,
+      isProjectModeActive: false,
+      projectMode: 'source',
+      error: '真实项目源码训练当前仅支持 Java 项目，请选择 Java 或关闭项目模式',
+    };
+  }
+
+  return {
+    success: true,
+    isProjectModeActive: Boolean(sourceProjectProvided && languageSupportsProjectMode),
+    sourceProject: sourceProjectProvided ? params.sourceProject as SourceProjectSelection : undefined,
+    projectMode: isProjectMode(params.projectMode) ? params.projectMode : 'source',
+  };
 }
 
 /**
@@ -85,6 +155,7 @@ export class AgentOrchestrator {
     coveredVulnerabilityTypes?: string[];
     maxRetries?: number;
     shouldAbort?: () => boolean;
+    projectSeed?: import('@/lib/project-audit/types').ProjectSeedPlanEntry;
   }): Promise<{
     success: boolean;
     question?: Question;
@@ -112,13 +183,19 @@ export class AgentOrchestrator {
       attempts++;
 
       const genResult = await this.questionGenerator.generateQuestion({
-        language: params.language,
+        language: params.projectSeed ? 'java' : params.language,
         difficulty: params.difficulty,
-        vulnerabilityType: params.vulnerabilityType,
-        targetClauseNumber: params.targetClauseNumber,
+        vulnerabilityType: params.projectSeed ? params.projectSeed.seed.vulnerabilityType : params.vulnerabilityType,
+        targetClauseNumber: params.projectSeed ? params.projectSeed.seed.standardReference.match(/\d+(?:\.\d+)+/)?.[0] : params.targetClauseNumber,
         excludedVulnerabilityTypes: params.excludedVulnerabilityTypes,
         coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
         count: 1,
+        projectSeed: params.projectSeed
+          ? {
+            seed: params.projectSeed.seed,
+            taskType: params.projectSeed.taskType,
+          }
+          : undefined,
       });
 
       if (!genResult.success || !genResult.questions?.[0]) {
@@ -135,11 +212,14 @@ export class AgentOrchestrator {
       }
 
       if (isFastReviewEligible(question, this.assessmentOptions)) {
-        const normalizedType = normalizeVulnerabilityType(question.vulnerabilityType);
-        const excludedTypes = (params.excludedVulnerabilityTypes || []).map(normalizeVulnerabilityType);
+        // 项目源码模式：漏洞类型由 seed 固定，同类型不同 seed 不应互相排除（唯一性按 seed id 保证）
+        if (!params.projectSeed) {
+          const normalizedType = normalizeVulnerabilityType(question.vulnerabilityType);
+          const excludedTypes = (params.excludedVulnerabilityTypes || []).map(normalizeVulnerabilityType);
 
-        if (normalizedType && excludedTypes.includes(normalizedType)) {
-          continue;
+          if (normalizedType && excludedTypes.includes(normalizedType)) {
+            continue;
+          }
         }
 
         return {
@@ -159,11 +239,13 @@ export class AgentOrchestrator {
       const reviewResult = await this.reviewerAgent.reviewAndFix(question);
 
       if (reviewResult.success && reviewResult.question) {
-        const normalizedType = normalizeVulnerabilityType(reviewResult.question.vulnerabilityType);
-        const excludedTypes = (params.excludedVulnerabilityTypes || []).map(normalizeVulnerabilityType);
+        if (!params.projectSeed) {
+          const normalizedType = normalizeVulnerabilityType(reviewResult.question.vulnerabilityType);
+          const excludedTypes = (params.excludedVulnerabilityTypes || []).map(normalizeVulnerabilityType);
 
-        if (normalizedType && excludedTypes.includes(normalizedType)) {
-          continue;
+          if (normalizedType && excludedTypes.includes(normalizedType)) {
+            continue;
+          }
         }
 
         const finalizedQuestion = shuffleQuestionOptions(reviewResult.question);
@@ -197,6 +279,10 @@ export class AgentOrchestrator {
     onProgress?: (current: number, total: number) => void;
     onStage?: (stage: { label: string; detail: string; progress: number }) => void;
     shouldAbort?: () => boolean;
+    sourceProject?: SourceProjectSelection;
+    projectMode?: ProjectMode;
+    coveredSeedIds?: string[];
+    answerCountBySeedId?: Record<string, number>;
   } = {}): Promise<{
     success: boolean;
     questions?: Question[];
@@ -210,7 +296,19 @@ export class AgentOrchestrator {
     retrievalTrace?: RetrievalTraceItem[];
   }> {
     const startedAt = Date.now();
-    const total = params.totalQuestions || 8;
+    const totalResolution = normalizeQuizTotal(params.totalQuestions);
+    if (!totalResolution.success) {
+      return {
+        success: false,
+        errors: [totalResolution.error],
+        grounding: {
+          grounded: false,
+          issues: [],
+        },
+        retrievalTrace: [],
+      };
+    }
+    const total = totalResolution.total;
     const questions: Question[] = [];
     const errors: string[] = [];
     const usages: TokenUsage[] = [];
@@ -219,10 +317,47 @@ export class AgentOrchestrator {
     const retrievalTrace: RetrievalTraceItem[] = [];
     const seedQuestions: Question[] = [];
     const reviewScores: number[] = [];
+    const projectModeResolution = resolveProjectQuizMode(params);
+    if (!projectModeResolution.success) {
+      return {
+        success: false,
+        errors: [projectModeResolution.error || '项目模式参数无效'],
+        grounding: {
+          grounded: false,
+          issues: [],
+        },
+        retrievalTrace,
+      };
+    }
+
+    const sourceProject = projectModeResolution.sourceProject;
+    const projectMode = projectModeResolution.projectMode;
+    const isProjectModeActive = projectModeResolution.isProjectModeActive;
     const coverageTargets = params.vulnerabilityType
       ? []
-      : buildCoverageExpansionTargets(params.language, params.coveredVulnerabilityTypes || [], total);
-    const seedEntries = buildSeedPlan(total, coverageTargets);
+      : isProjectModeActive
+        ? []
+        : buildCoverageExpansionTargets(params.language, params.coveredVulnerabilityTypes || [], total);
+    const initialProjectPlan = isProjectModeActive
+      ? buildProjectSeedPlan({
+        total,
+        sourceProject: sourceProject!,
+        projectMode,
+        coveredSeedIds: params.coveredSeedIds,
+        answerCountBySeedId: params.answerCountBySeedId,
+      })
+      : [];
+    const seedEntries: QuizSeedEntry[] = isProjectModeActive
+      ? initialProjectPlan.map((entry) => ({
+        difficulty: entry.difficulty,
+        count: 1 as const,
+        projectSeed: entry,
+      }))
+      : buildSeedPlan(total, coverageTargets);
+    // 补题阶段只允许在"未通过"的 seed 中重选，避免和 initialProjectPlan 中的 seed 重复
+    const usedProjectSeedIds = new Set<string>(
+      isProjectModeActive ? initialProjectPlan.map((entry) => entry.seed.id) : [],
+    );
     let supplementAttemptCount = 0;
     let duplicateTypeRejectCount = 0;
     let duplicateSimilarityRejectCount = 0;
@@ -230,60 +365,107 @@ export class AgentOrchestrator {
     let generationFailureCount = 0;
     const abortedError = '题目集生成已取消';
     const maxSupplementAttemptCount = Math.max(total * 5, 12);
-    const excludedSeedTypes = [...(params.coveredVulnerabilityTypes || [])];
+    // 种子生成阶段每个槽位最多重试次数：与 generateApprovedQuestion 默认 maxRetries 对齐。
+    // generateQuestion 的校验链很长（schema→标准对齐→grounding→相似度等），任何一环随机
+    // 失败都会丢掉这道候选；count:1 只有单次机会时几个槽位失败即导致 questions.length < total，
+    // 于是每次都跳进补题阶段。给每个槽位有限重试，让种子命中率显著提升。
+    const seedGenerationMaxAttempts = 3;
+    // 历史已覆盖类型只用于覆盖率扩展的"偏好排序"（buildCoverageExpansionTargets 优先未覆盖、
+    // getDynamicTopicHints 把未覆盖类型排前），不应作为首轮 seed 的硬排除。首轮候选现在并发生成，
+    // 每个槽位只排除它之前的计划目标；最终唯一性仍由审核后 dedupe 与补题阶段兜底。
+
+    const reviewConcurrency = getReviewConcurrency(this.assessmentOptions);
 
     params.onStage?.({
       label: '检索知识库',
-      detail: '正在检索知识库并逐题生成候选题…',
+      detail: `正在检索知识库并并发生成候选题（并发 ${reviewConcurrency}）…`,
       progress: 18,
     });
 
-    for (const [index, { difficulty, count, target }] of seedEntries.entries()) {
-      if (params.shouldAbort?.() || count <= 0) {
-        continue;
+    let completedSeedSlots = 0;
+    const seedSlotResults = await mapWithConcurrency(seedEntries, reviewConcurrency, async (entry, index) => {
+      const slot = entry as {
+        difficulty: 'easy' | 'medium' | 'hard';
+        count: number;
+        target?: { title?: string; clauseNumber?: string };
+        projectSeed?: import('@/lib/project-audit/types').ProjectSeedPlanEntry;
+      };
+      if (!slot.count || params.shouldAbort?.()) {
+        return {
+          index,
+          result: null,
+        };
       }
 
+      let result: QuestionGenResult | null = null;
+      const excludedTypesForSlot = params.vulnerabilityType || isProjectModeActive
+        ? []
+        : buildSeedExcludedTypesSnapshot(seedEntries, index);
+
+      for (let attempt = 1; attempt <= seedGenerationMaxAttempts; attempt++) {
+        if (params.shouldAbort?.()) {
+          break;
+        }
+        params.onStage?.({
+          label: '生成候选题目',
+          detail: slot.projectSeed
+            ? `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度项目题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`
+            : `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度候选题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`,
+          progress: getSeedGenerationProgress(slot.difficulty),
+        });
+
+        result = await this.questionGenerator.generateQuestion({
+          language: slot.projectSeed ? 'java' : params.language,
+          difficulty: slot.difficulty,
+          vulnerabilityType: slot.projectSeed ? slot.projectSeed.seed.vulnerabilityType : (params.vulnerabilityType || slot.target?.title),
+          targetClauseNumber: slot.projectSeed ? slot.projectSeed.seed.standardReference.match(/\d+(?:\.\d+)+/)?.[0] : slot.target?.clauseNumber,
+          excludedVulnerabilityTypes: excludedTypesForSlot,
+          coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
+          count: slot.count,
+          projectSeed: slot.projectSeed
+            ? {
+              seed: slot.projectSeed.seed,
+              taskType: slot.projectSeed.taskType,
+            }
+            : undefined,
+        });
+
+        if (result.success && result.questions?.length) {
+          break;
+        }
+      }
+
+      completedSeedSlots += 1;
       params.onStage?.({
         label: '生成候选题目',
-        detail: `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[difficulty]}难度候选题…`,
-        progress: getSeedGenerationProgress(difficulty),
+        detail: `已完成 ${completedSeedSlots}/${seedEntries.length} 个候选槽位生成…`,
+        progress: getSeedGenerationProgress(slot.difficulty),
       });
 
-      const seedResult = await this.questionGenerator.generateQuestion({
-        language: params.language,
-        difficulty,
-        vulnerabilityType: params.vulnerabilityType || target?.title,
-        targetClauseNumber: target?.clauseNumber,
-        excludedVulnerabilityTypes: params.vulnerabilityType ? [] : excludedSeedTypes,
-        coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
-        count,
-      });
+      return {
+        index,
+        result,
+      };
+    });
 
-      if (seedResult.usage) {
+    for (const { index, result: seedResult } of seedSlotResults) {
+      if (seedResult?.usage) {
         usages.push(seedResult.usage);
       }
-      citations.push(...(seedResult.citations || []));
-      retrievalTrace.push(...(seedResult.retrievalTrace || []));
-      if (seedResult.grounding?.issues?.length) {
+      citations.push(...(seedResult?.citations || []));
+      retrievalTrace.push(...(seedResult?.retrievalTrace || []));
+      if (seedResult?.grounding?.issues?.length) {
         groundingIssues.push(...seedResult.grounding.issues);
       }
 
-      if (seedResult.success && seedResult.questions?.length) {
+      if (seedResult?.success && seedResult.questions?.length) {
         seedQuestions.push(...seedResult.questions);
-        if (!params.vulnerabilityType) {
-          for (const question of seedResult.questions) {
-            if (question.vulnerabilityType) {
-              excludedSeedTypes.push(question.vulnerabilityType);
-            }
-          }
-        }
       } else {
         generationFailureCount++;
-        errors.push(seedResult.error || `第 ${index + 1} 道候选题生成失败`);
+        errors.push(seedResult?.error || `第 ${index + 1} 道候选题生成失败`);
       }
     }
 
-    const reviewConcurrency = getReviewConcurrency(this.assessmentOptions);
     params.onStage?.({
       label: '审核候选题目',
       detail: `正在并发审核 ${seedQuestions.length} 道候选题（并发 ${reviewConcurrency}），筛除重复和低质量内容…`,
@@ -330,7 +512,7 @@ export class AgentOrchestrator {
         reviewScores.push(reviewResult.review.score);
       }
 
-      const dedupeKey = buildQuestionDedupeKey(reviewResult.question, Boolean(params.vulnerabilityType));
+      const dedupeKey = buildQuestionDedupeKey(reviewResult.question, true);
       if (seenQuestionKeys.has(dedupeKey)) {
         duplicateTypeRejectCount++;
         continue;
@@ -385,15 +567,35 @@ export class AgentOrchestrator {
             ? undefined
             : pickSupplementCoverageTarget(coverageTargets, targetQuestionIndex, attemptNumber);
 
+          // 项目模式：补题仍必须基于项目 seed（且不能与已用 seed 重复），不允许回退到标准题
+          let projectSeed: import('@/lib/project-audit/types').ProjectSeedPlanEntry | undefined;
+          if (isProjectModeActive) {
+            const candidate = pickProjectSupplementSeed({
+              sourceProject: sourceProject!,
+              projectMode,
+              excludedSeedIds: usedProjectSeedIds,
+              difficulty: getDifficultyForIndex(targetQuestionIndex, total),
+            });
+            if (candidate) {
+              projectSeed = candidate;
+              usedProjectSeedIds.add(candidate.seed.id);
+            }
+          }
+
           const result = await this.generateApprovedQuestion({
-            language: params.language,
+            language: projectSeed ? 'java' : params.language,
             difficulty: getDifficultyForIndex(targetQuestionIndex, total),
-            vulnerabilityType: params.vulnerabilityType || supplementTarget?.title,
-            targetClauseNumber: params.vulnerabilityType ? undefined : supplementTarget?.clauseNumber,
+            vulnerabilityType: projectSeed
+              ? projectSeed.seed.vulnerabilityType
+              : (params.vulnerabilityType || supplementTarget?.title),
+            targetClauseNumber: projectSeed
+              ? projectSeed.seed.standardReference.match(/\d+(?:\.\d+)+/)?.[0]
+              : (params.vulnerabilityType ? undefined : supplementTarget?.clauseNumber),
             excludedVulnerabilityTypes: params.vulnerabilityType ? [] : excludedTypesSnapshot,
             coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
             maxRetries: Math.max(6, missingCount * 3),
             shouldAbort: params.shouldAbort,
+            projectSeed,
           });
 
           return {
@@ -708,20 +910,36 @@ function buildLocalLearningPath(params: {
       ? [`本次答对 ${params.correctQuestions.length}/${params.totalQuestions} 题，已有一定审计基础，但答对类型仍需结合错题继续巩固。`]
       : ['本次暂未形成稳定掌握点，建议先从错题暴露出的漏洞类型开始补齐。'];
 
+  const projectBreakdown = summarizeProjectBreakdown(params.wrongQuestions);
+  const projectContextLine = projectBreakdown.length > 0
+    ? projectBreakdown.map((item) => `${item.projectId}（${item.count} 题）`).join('、')
+    : '未启用项目模式';
+
   const weaknesses = wrongTypes.length > 0
-    ? wrongTypes.map((item) => (
+    ? [
+      `项目覆盖: ${projectContextLine}`,
+      ...wrongTypes.map((item) => (
         `${item.vulnerabilityType}：本次答错 ${item.count} 题，优先回看 ${item.languageLabel} 相关条款和典型危险写法。`
-      ))
+      )),
+    ]
     : ['本次未暴露明显薄弱点，可继续提高题目难度或扩展到其他语言标准。'];
 
   const recommendations = wrongTypes.length > 0
-    ? wrongTypes.map((item) => (
+    ? [
+      `项目维度: ${projectBreakdown.length > 0 ? projectBreakdown.map((item) => `${item.projectId} 的 ${item.taskTypes.join('/')} 薄弱`).join('；') : '未启用项目模式'}`,
+      ...wrongTypes.map((item) => (
         `针对 ${item.vulnerabilityType}，建议先复盘错题代码中的输入来源、危险 API 或边界条件，再对照标准条款写出修复规则。`
-      ))
+      )),
+    ]
     : ['保持当前节奏，下一轮可选择更高难度或混合语言测评，验证知识迁移能力。'];
 
   const nextTopics = wrongTypes.length > 0
-    ? wrongTypes.map((item) => `${item.languageLabel} ${item.vulnerabilityType} 专项练习`)
+    ? wrongTypes.map((item) => {
+      const projectHint = projectBreakdown.length > 0
+        ? `（${projectBreakdown.map((p) => p.projectId).join('/')}）`
+        : '';
+      return `${item.languageLabel} ${item.vulnerabilityType} 专项练习 ${projectHint}`.trim();
+    })
     : correctTypes.slice(0, 3).map((item) => `${item.languageLabel} ${item.vulnerabilityType} 进阶审计`);
 
   return {
@@ -730,6 +948,32 @@ function buildLocalLearningPath(params: {
     recommendations: recommendations.slice(0, 4),
     nextTopics: (nextTopics.length > 0 ? nextTopics : ['混合语言漏洞审计综合练习']).slice(0, 4),
   };
+}
+
+function summarizeProjectBreakdown(questions: Question[]): Array<{
+  projectId: 'YM_PT' | 'itstec-24';
+  count: number;
+  taskTypes: string[];
+}> {
+  const grouped = new Map<'YM_PT' | 'itstec-24', { count: number; taskTypes: Set<string> }>();
+  for (const question of questions) {
+    if (!question.sourceProject) {
+      continue;
+    }
+    const existing = grouped.get(question.sourceProject) || { count: 0, taskTypes: new Set<string>() };
+    existing.count += 1;
+    if (question.auditTaskType) {
+      existing.taskTypes.add(question.auditTaskType);
+    }
+    grouped.set(question.sourceProject, existing);
+  }
+  return Array.from(grouped.entries())
+    .map(([projectId, value]) => ({
+      projectId,
+      count: value.count,
+      taskTypes: Array.from(value.taskTypes),
+    }))
+    .sort((a, b) => b.count - a.count);
 }
 
 function summarizeQuestionTypes(questions: Question[]): Array<{
@@ -878,6 +1122,36 @@ function pickSupplementCoverageTarget(
   return targets[(questionIndex + offset) % targets.length];
 }
 
+function buildSeedExcludedTypesSnapshot(
+  seedEntries: Array<{ target?: { title?: string } }>,
+  currentIndex: number,
+): string[] {
+  return seedEntries
+    .slice(0, currentIndex)
+    .map((entry) => entry.target?.title?.trim())
+    .filter((title): title is string => Boolean(title));
+}
+
+function pickProjectSupplementSeed(params: {
+  sourceProject: SourceProjectSelection;
+  projectMode: ProjectMode;
+  excludedSeedIds: Set<string>;
+  difficulty: 'easy' | 'medium' | 'hard';
+}): import('@/lib/project-audit/types').ProjectSeedPlanEntry | undefined {
+  const candidates = buildProjectSeedPlan({
+    total: 1,
+    sourceProject: params.sourceProject,
+    projectMode: params.projectMode,
+    coveredSeedIds: Array.from(params.excludedSeedIds),
+  });
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  // 优先难度匹配，否则取任意可用的 seed
+  const exactDifficulty = candidates.find((entry) => entry.difficulty === params.difficulty);
+  return exactDifficulty || candidates[0];
+}
+
 const difficultyLabelMap: Record<'easy' | 'medium' | 'hard', string> = {
   easy: '简单',
   medium: '中等',
@@ -915,6 +1189,16 @@ function getFallbackProgress(current: number, total: number): number {
 }
 
 function buildQuestionDedupeKey(question: Question, allowSameVulnerabilityType: boolean): string {
+  if (question.sourceProject && question.findingSeedId) {
+    return [
+      'project',
+      question.sourceProject,
+      question.findingSeedId,
+      question.auditTaskType || 'source',
+      question.variantOfFindingId || '',
+    ].join(':');
+  }
+
   const normalizedType = normalizeVulnerabilityType(question.vulnerabilityType);
   if (!allowSameVulnerabilityType) {
     return normalizedType;
@@ -1039,6 +1323,32 @@ function normalizeAssessmentGenerationOptions(
     fastReview: options?.fastReview ?? true,
     reviewConcurrency: normalizeReviewConcurrency(options?.reviewConcurrency ?? 3),
   };
+}
+
+function normalizeQuizTotal(value: unknown): {
+  success: true;
+  total: number;
+} | {
+  success: false;
+  error: string;
+} {
+  if (value === undefined || value === null) {
+    return { success: true, total: 8 };
+  }
+
+  const parsed = typeof value === 'number'
+    ? value
+    : Number(String(value).trim());
+  const allowedTotals = new Set([3, 5, 8, 10]);
+
+  if (!Number.isInteger(parsed) || !allowedTotals.has(parsed)) {
+    return {
+      success: false,
+      error: 'totalQuestions 只能是 3、5、8 或 10',
+    };
+  }
+
+  return { success: true, total: parsed };
 }
 
 function isFastReviewEligible(question: Question, options: AssessmentGenerationOptions): boolean {

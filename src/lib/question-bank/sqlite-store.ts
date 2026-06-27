@@ -17,6 +17,33 @@ import crypto from 'crypto';
 
 export type MasteryStatus = 'unreviewed' | 'needs_review' | 'mastered';
 
+export interface ProjectAuditMetadata {
+  sourceProject: 'YM_PT' | 'itstec-24';
+  auditTaskType: 'identify' | 'trace' | 'fix' | 'falsePositive' | 'variant';
+  findingSeedId: string;
+  variantOfFindingId?: string;
+  sourceRefs: Array<{
+    projectId: 'YM_PT' | 'itstec-24';
+    path: string;
+    startLine: number;
+    endLine: number;
+    role: 'entry' | 'controller' | 'service' | 'mapper' | 'sink' | 'config' | 'utility' | 'evidence' | 'filter';
+    symbol?: string;
+  }>;
+  evidenceFlow: Array<{
+    label: string;
+    ref: {
+      projectId: 'YM_PT' | 'itstec-24';
+      path: string;
+      startLine: number;
+      endLine: number;
+      role: 'entry' | 'controller' | 'service' | 'mapper' | 'sink' | 'config' | 'utility' | 'evidence' | 'filter';
+      symbol?: string;
+    };
+    summary: string;
+  }>;
+}
+
 export interface QuestionRecord {
   id: string;
   questionText: string;
@@ -29,6 +56,8 @@ export interface QuestionRecord {
   vulnerabilityType: string;
   standardReference: string;
   createdAt: string;
+  metadataJson?: string | null;
+  projectMetadata?: ProjectAuditMetadata | null;
 }
 
 export interface QuestionWithStats extends QuestionRecord {
@@ -82,6 +111,12 @@ interface AssessmentQuestionInput {
   difficulty: string;
   vulnerabilityType: string;
   standardReference: string;
+  sourceProject?: 'YM_PT' | 'itstec-24';
+  auditTaskType?: 'identify' | 'trace' | 'fix' | 'falsePositive' | 'variant';
+  findingSeedId?: string;
+  variantOfFindingId?: string;
+  sourceRefs?: ProjectAuditMetadata['sourceRefs'];
+  evidenceFlow?: ProjectAuditMetadata['evidenceFlow'];
 }
 
 interface AssessmentAnswerInput {
@@ -143,9 +178,21 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_qr_diff     ON question_records(difficulty);
   `);
 
+  ensureQuestionMetadataSchema(db);
   ensureAnswerRecordsSchema(db);
   ensureAiExplanationsSchema(db);
   ensureMasteryStatusSchema(db);
+}
+
+function ensureQuestionMetadataSchema(db: Database.Database): void {
+  const columns = getTableColumns(db, 'question_records');
+  const hasMetadataJson = columns.some((column) => column.name === 'metadata_json');
+  if (!hasMetadataJson) {
+    db.exec(`
+      ALTER TABLE question_records
+      ADD COLUMN metadata_json TEXT;
+    `);
+  }
 }
 
 function tableExists(db: Database.Database, tableName: string): boolean {
@@ -351,6 +398,18 @@ function resolveLastUserAnswerIndex(
 
 function mapRow(row: Record<string, unknown>): QuestionWithStats {
   const options = JSON.parse(row.options as string) as string[];
+  const metadataJson = row.metadata_json as string | null | undefined;
+  let projectMetadata: ProjectAuditMetadata | null = null;
+  if (metadataJson) {
+    try {
+      const parsed = JSON.parse(metadataJson) as ProjectAuditMetadata;
+      if (parsed && typeof parsed === 'object' && parsed.sourceProject) {
+        projectMetadata = parsed;
+      }
+    } catch {
+      // 忽略损坏的 metadata_json，保留向后兼容
+    }
+  }
 
   return {
     id: row.id as string,
@@ -364,6 +423,8 @@ function mapRow(row: Record<string, unknown>): QuestionWithStats {
     vulnerabilityType: row.vulnerability_type as string,
     standardReference: row.standard_reference as string,
     createdAt: row.created_at as string,
+    metadataJson: metadataJson || null,
+    projectMetadata,
     lastUserAnswer: resolveLastUserAnswerIndex(
       options,
       row.last_user_answer,
@@ -377,6 +438,21 @@ function mapRow(row: Record<string, unknown>): QuestionWithStats {
     masteryStatus: ((row.mastery_status as string) ?? 'unreviewed') as MasteryStatus,
     hasAiExplanation: Boolean(row.has_ai_explanation),
   };
+}
+
+function buildProjectMetadataJson(question: AssessmentQuestionInput): string | null {
+  if (!question.sourceProject || !question.auditTaskType || !question.findingSeedId) {
+    return null;
+  }
+  const payload: ProjectAuditMetadata = {
+    sourceProject: question.sourceProject,
+    auditTaskType: question.auditTaskType,
+    findingSeedId: question.findingSeedId,
+    variantOfFindingId: question.variantOfFindingId,
+    sourceRefs: question.sourceRefs || [],
+    evidenceFlow: question.evidenceFlow || [],
+  };
+  return JSON.stringify(payload);
 }
 
 function getUserActivityScore(db: Database.Database, userId: string): number {
@@ -461,6 +537,7 @@ const BASE_SELECT = `
   SELECT
     q.id, q.question_text, q.code, q.language, q.options, q.correct_answer,
     q.explanation, q.difficulty, q.vulnerability_type, q.standard_reference, q.created_at,
+    q.metadata_json,
     la.user_answer AS last_user_answer,
     la.selected_option_text AS last_selected_option_text,
     la.is_correct  AS last_is_correct,
@@ -513,9 +590,11 @@ export function saveAssessmentResults(
   const now = new Date().toISOString();
 
   const insertQuestion = db.prepare(`
-    INSERT OR IGNORE INTO question_records
-      (id, question_text, code, language, options, correct_answer, explanation, difficulty, vulnerability_type, standard_reference, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO question_records
+      (id, question_text, code, language, options, correct_answer, explanation, difficulty, vulnerability_type, standard_reference, created_at, metadata_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      metadata_json = COALESCE(excluded.metadata_json, question_records.metadata_json)
   `);
 
   const insertAnswer = db.prepare(`
@@ -541,6 +620,7 @@ export function saveAssessmentResults(
     for (let i = 0; i < answers.length; i++) {
       const { question: q, userAnswer, isCorrect } = answers[i];
       const questionId = generateQuestionId(q.question, q.code);
+      const metadataJson = buildProjectMetadataJson(q);
 
       insertQuestion.run(
         questionId,
@@ -554,6 +634,7 @@ export function saveAssessmentResults(
         q.vulnerabilityType,
         q.standardReference,
         now,
+        metadataJson,
       );
 
       initMastery.run(userId, questionId, now);
@@ -892,4 +973,46 @@ export function getCoveredVulnerabilityTypes(userId: string, language?: string):
       `)
       .all(userId) as { vulnerability_type: string }[]
   ).map((r) => r.vulnerability_type);
+}
+
+/** 返回指定用户已答过（含历史任意一次）的 findingSeedId 集合；用于项目模式去重。 */
+export function getCoveredFindingSeedIds(userId: string): string[] {
+  const db = getDb();
+  const rows = db
+    .prepare(`
+      SELECT DISTINCT json_extract(q.metadata_json, '$.findingSeedId') AS finding_seed_id
+      FROM answer_records a
+      JOIN question_records q ON a.question_id = q.id
+      WHERE a.user_id = ?
+        AND json_extract(q.metadata_json, '$.findingSeedId') IS NOT NULL
+    `)
+    .all(userId) as Array<{ finding_seed_id: string | null }>;
+
+  return rows
+    .map((row) => row.finding_seed_id)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+/** 返回指定 findingSeedId 的历史答题次数，便于 seed-plan 优先选未答过的 seed。 */
+export function getAnswerCountByFindingSeedId(userId: string): Record<string, number> {
+  const db = getDb();
+  const rows = db
+    .prepare(`
+      SELECT json_extract(q.metadata_json, '$.findingSeedId') AS finding_seed_id,
+             COUNT(a.id) AS answer_count
+      FROM answer_records a
+      JOIN question_records q ON a.question_id = q.id
+      WHERE a.user_id = ?
+        AND json_extract(q.metadata_json, '$.findingSeedId') IS NOT NULL
+      GROUP BY json_extract(q.metadata_json, '$.findingSeedId')
+    `)
+    .all(userId) as Array<{ finding_seed_id: string | null; answer_count: number }>;
+
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    if (row.finding_seed_id) {
+      result[row.finding_seed_id] = row.answer_count;
+    }
+  }
+  return result;
 }

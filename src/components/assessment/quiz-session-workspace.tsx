@@ -28,6 +28,7 @@ import { Progress } from '@/components/ui/progress';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { AgentWorkspaceShell } from '@/components/assessment/agent-workspace-shell';
 import { AssessmentCodeBlock } from '@/components/assessment/assessment-code-block';
+import { ProjectSourceEvidence } from '@/components/assessment/project-source-evidence';
 import { formatAgentElapsed } from '@/lib/format-agent-elapsed';
 import { getLanguageLabel } from '@/lib/standards';
 import type { LearningTopic } from '@/lib/learning/topics';
@@ -331,6 +332,16 @@ export function QuizSessionWorkspace({
                 </div>
               </div>
 
+              {question.sourceProject ? (
+                <ProjectSourceEvidence
+                  projectId={question.sourceProject}
+                  auditTaskType={question.auditTaskType}
+                  findingSeedId={question.findingSeedId}
+                  sourceRefs={question.sourceRefs}
+                  evidenceFlow={question.evidenceFlow}
+                />
+              ) : null}
+
               <div className="shrink-0">
                 <p className="mb-1.5 font-mono text-xs uppercase tracking-wider text-muted-foreground">
                   Options
@@ -379,6 +390,17 @@ export function QuizSessionWorkspace({
                   <AssessmentCodeBlock code={question.code} language={question.language} size="quiz" />
                 </div>
               </div>
+
+              {question.sourceProject ? (
+                <ProjectSourceEvidence
+                  projectId={question.sourceProject}
+                  auditTaskType={question.auditTaskType}
+                  findingSeedId={question.findingSeedId}
+                  sourceRefs={question.sourceRefs}
+                  evidenceFlow={question.evidenceFlow}
+                  className="mb-2"
+                />
+              ) : null}
 
               <RadioGroup
                 value={selectedAnswer?.toString()}

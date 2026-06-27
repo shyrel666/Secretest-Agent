@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper SYSTEM "file:///D:/mybatis-3-mapper.dtd">
+<mapper namespace="org.itstec.user.mapper.UserMapper">
+
+    <insert id="regiest">
+    	INSERT INTO t_user 
+    	(userId, pwd, userName)
+    	VALUES
+    	(#{userId}, #{pwd}, #{userName})
+    </insert>
+    
+   <select id="login" resultType="org.itstec.user.entity.User">
+		SELECT userId, userName, userPhone, userAddress, doctorId 
+		FROM t_user
+		WHERE userId = #{userId} and pwd = #{pwd}
+	</select>
+	
+	<update id="updatePwd" flushCache="true" >
+        UPDATE t_user
+        SET pwd = #{newPwd}
+        WHERE userId = #{userId} and pwd = #{pwd}
+    </update>
+	
+	<update id="updateInfo" parameterType="org.itstec.user.entity.User" flushCache="true" >
+        UPDATE t_user
+        SET
+            userPhone = #{userPhone},
+            userAddress = #{userAddress}
+        WHERE userId = #{userId}
+    </update>
+    
+    <select id="show" resultType="org.itstec.user.entity.User">
+		SELECT userId, userName, userPhone, userAddress, doctorId 
+		FROM t_user
+		WHERE userId = #{userId}
+	</select>
+	
+	<update id="updateDoctor" flushCache="true" >
+        UPDATE t_user
+        SET doctorId = #{doctorID}
+        WHERE userId = #{userId} 
+    </update>
+	
+	
+</mapper>

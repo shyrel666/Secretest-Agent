@@ -2,11 +2,13 @@ import { LLMClient, Config, CozeConfig } from 'coze-coding-dev-sdk';
 import type { Question } from './question-generator-agent';
 import type { ModelConfig } from './types';
 import { toLLMConfig, DEFAULT_CONFIG } from './types';
-import { createEstimatedUsage, type TokenUsage } from '@/lib/token-usage';
+import { createEstimatedUsage, sumTokenUsage, type TokenUsage } from '@/lib/token-usage';
 import { InternalMcpToolbox, type RetrievalTraceItem, type ToolCitation, type ToolSearchResult } from '@/lib/knowledge/mcp-tools';
 import type { SearchResultItem } from '@/lib/knowledge';
 import { parseReviewOutput } from './output-schemas';
 import { validateStandardAlignedQuestion } from './standard-alignment-validator';
+import { validateProjectGroundedQuestion } from '@/lib/project-audit/project-grounding-validator';
+import { getProjectFindingSeed } from '@/lib/project-audit/source-code-findings';
 
 // 审核Agent的系统提示词
 const REVIEWER_PROMPT = `你是一位资深的代码安全审计专家，负责审核测评题目的质量和准确性。
@@ -19,13 +21,20 @@ const REVIEWER_PROMPT = `你是一位资深的代码安全审计专家，负责�
 5. 标准引用是否正确
 6. 题目代码是否只是照搬知识库中的示例代码；如果只是换少量名字或字面量，也应判为不合格
 
-你不是在审核一道普通安全题，而是在审核“标准能力测量题”。必须额外检查：
+你不是在审核一道普通安全题，而是在审核”标准能力测量题”。必须额外检查：
 7. 题目是否锚定一个具体 GB/T 条款，而不是泛泛引用标准
 8. 代码是否能测量该条款要求的审核能力
 9. 代码证据是否足够支持唯一正确答案
 10. 选项是否围绕条款判定设计，错误选项不能与正确选项语义等价
 11. 解析是否说明标准条款、代码证据、正确答案依据和错误选项排除理由
 12. 代码中是否存在 unsafe、vuln、risk、injection、漏洞、注入等提示性命名或字符串
+
+当题目携带 sourceProject / sourceRefs / evidenceFlow / findingSeedId 等源码项目元数据时，必须额外检查：
+13. sourceProject 必须是已注册项目（YM_PT / itstec-24）
+14. findingSeedId 必须指向真实存在的 seed
+15. 解析必须引用源码项目名、文件路径、方法名、关键代码证据和 GB/T 条款，不能只复述标准条款
+16. variant 题的 variantOfFindingId 必须指向同一漏洞模式的源 seed，且代码应保留原 seed 的 source -> processing -> sink 结构
+17. 不得删除、丢失或修改 sourceRefs / evidenceFlow 字段
 
 ## 输出格式（JSON）
 
@@ -34,16 +43,16 @@ const REVIEWER_PROMPT = `你是一位资深的代码安全审计专家，负责�
   "score": 0-100的评分,
   "issues": ["问题1", "问题2"],
   "suggestions": ["改进建议1", "改进建议2"],
-  "correctedQuestion": { /* 如果需要修正，提供修正后的完整题目 */ }
+  "correctedQuestion": { /* 如果需要修正，提供修正后的完整题目，必须保留所有 sourceProject 元数据 */ }
 }
 
 如果题目质量合格（score >= 80），approved为true。
 如果题目有问题需要修正，提供correctedQuestion。
 如果题目无法修正，approved为false。
 
-如果你发现题目代码与知识库中的示例代码过于相似，必须在 issues 中明确指出“照搬示例代码”，并要求改为基于漏洞原理重新构造的业务场景代码。
+如果你发现题目代码与知识库中的示例代码过于相似，必须在 issues 中明确指出”照搬示例代码”，并要求改为基于漏洞原理重新构造的业务场景代码。
 
-如果提供 correctedQuestion，修正后的题目必须仍然绑定同一类标准条款，并且代码必须是无注释、无答案提示命名、单一主要漏洞、可审计证据清晰的自然业务代码。`;
+如果提供 correctedQuestion，修正后的题目必须仍然绑定同一类标准条款，并且代码必须是无注释、无答案提示命名、单一主要漏洞、可审计证据清晰的自然业务代码。当原题携带源码项目元数据时，修正版必须完整保留 sourceProject、auditTaskType、findingSeedId、sourceRefs、evidenceFlow 字段。`;
 
 export interface ReviewResult {
   approved: boolean;
@@ -151,6 +160,13 @@ ${knowledgeContext || '（无相关知识库内容）'}
       ];
 
       const response = await this.llmClient.invoke(messages, toLLMConfig(this.config));
+      const usage = sumTokenUsage([
+        searchResult.usage,
+        createEstimatedUsage({
+          messages,
+          completionText: response.content,
+        }),
+      ]);
 
       const content = response.content.trim()
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -162,6 +178,7 @@ ${knowledgeContext || '（无相关知识库内容）'}
         return {
           success: false,
           error: '无法解析审核结果',
+          usage,
         };
       }
 
@@ -170,10 +187,7 @@ ${knowledgeContext || '（无相关知识库内容）'}
         return {
           success: false,
           error: `审核结果结构校验失败：${validation.issues.join('；')}`,
-          usage: createEstimatedUsage({
-            messages,
-            completionText: response.content,
-          }),
+          usage,
           retrievalTrace: [
             ...(clauseContext?.retrievalTrace || []),
             ...searchResult.retrievalTrace,
@@ -188,16 +202,52 @@ ${knowledgeContext || '（无相关知识库内容）'}
         return {
           success: false,
           result,
-          usage: createEstimatedUsage({
-            messages,
-            completionText: response.content,
-          }),
+          usage,
           retrievalTrace: [
             ...(clauseContext?.retrievalTrace || []),
             ...searchResult.retrievalTrace,
           ],
           error: `题目未通过标准对齐校验：${alignment.issues.join('；')}`,
         };
+      }
+
+      // 项目源码题：保证审查/修正后仍通过 project grounding
+      // 失败时优先回退到原 question（仍保留项目 metadata），让 orchestrator 决定是否重试
+      if (alignedQuestion.sourceProject && alignedQuestion.findingSeedId) {
+        const seed = getProjectFindingSeed(alignedQuestion.findingSeedId);
+        const grounding = validateProjectGroundedQuestion(
+          alignedQuestion,
+          seed || undefined,
+          { mode: alignedQuestion.auditTaskType === 'variant' ? 'variant' : 'source' },
+        );
+        if (!grounding.success) {
+          if (result.correctedQuestion) {
+            // LLM 修正版丢/改了项目 metadata → 退回原 question 并标记 issues
+            return {
+              success: false,
+              result: {
+                ...result,
+                correctedQuestion: question,
+              },
+              usage,
+              retrievalTrace: [
+                ...(clauseContext?.retrievalTrace || []),
+                ...searchResult.retrievalTrace,
+              ],
+              error: `项目源码题修正版未通过 grounding，已回退到原题：${grounding.issues.join('；')}`,
+            };
+          }
+          return {
+            success: false,
+            result,
+            usage,
+            retrievalTrace: [
+              ...(clauseContext?.retrievalTrace || []),
+              ...searchResult.retrievalTrace,
+            ],
+            error: `题目未通过项目源码校验：${grounding.issues.join('；')}`,
+          };
+        }
       }
 
       const groundedQuestion = toGroundingCandidate(result.correctedQuestion || question);
@@ -213,10 +263,7 @@ ${knowledgeContext || '（无相关知识库内容）'}
       return {
         success: true,
         result,
-        usage: createEstimatedUsage({
-          messages,
-          completionText: response.content,
-        }),
+        usage,
         citations: grounding.citations,
         grounding: {
           grounded: grounding.grounded,
@@ -307,22 +354,10 @@ ${knowledgeContext || '（无相关知识库内容）'}
       };
     }
 
-    if (review.approved) {
+    if (review.approved || review.correctedQuestion) {
       return {
         success: true,
-        question,
-        review,
-        usage: reviewResult.usage,
-        citations: reviewResult.citations,
-        grounding: reviewResult.grounding,
-        retrievalTrace: reviewResult.retrievalTrace,
-      };
-    }
-
-    if (review.correctedQuestion) {
-      return {
-        success: true,
-        question: review.correctedQuestion,
+        question: review.correctedQuestion || question,
         review,
         usage: reviewResult.usage,
         citations: reviewResult.citations,
@@ -348,12 +383,22 @@ function toGroundingCandidate(question: Question): {
   language?: string;
   standardReference?: string;
   vulnerabilityType?: string;
+  sourceProject?: string;
+  findingSeedId?: string;
+  sourceRefs?: Array<{ path: string; startLine: number; endLine: number }>;
 } {
   return {
     code: question.code,
     language: question.language,
     standardReference: question.standardReference,
     vulnerabilityType: question.vulnerabilityType,
+    sourceProject: question.sourceProject,
+    findingSeedId: question.findingSeedId,
+    sourceRefs: question.sourceRefs?.map((ref) => ({
+      path: ref.path,
+      startLine: ref.startLine,
+      endLine: ref.endLine,
+    })),
   };
 }
 

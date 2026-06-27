@@ -234,8 +234,10 @@ echo.
 exit /b 0
 
 :verify_pnpm_runtime
+:: Node 18.20+/20.12+/22+ (CVE-2024-27980) refuses to spawn .cmd/.bat via
+:: spawnSync unless shell:true, so pnpm.cmd must be run through a shell.
 set "PNPM_VER="
-for /f "tokens=*" %%a in ('pnpm -v 2^>nul') do set "PNPM_VER=%%a"
+for /f "tokens=*" %%a in ('node -e "const {spawnSync}=require('child_process');const cmd=process.platform==='win32'?'pnpm.cmd':'pnpm';const r=spawnSync(cmd,['-v'],{encoding:'utf8',timeout:15000,windowsHide:true,shell:true});if(r.error)process.exit(1);if(r.status)process.exit(r.status);process.stdout.write(String(r.stdout||'').trim());" 2^>nul') do set "PNPM_VER=%%a"
 if not defined PNPM_VER exit /b 1
 echo [OK] pnpm found: v!PNPM_VER!
 exit /b 0

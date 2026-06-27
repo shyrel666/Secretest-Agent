@@ -113,11 +113,13 @@ function TokenUsageTriggerContent({
 function MountedTokenUsageIndicator() {
   const records = useTokenUsageStore((state) => state.records);
   const clearRecords = useTokenUsageStore((state) => state.clearRecords);
+  const [now, setNow] = useState(() => new Date());
   const [selectedWeekStartKey, setSelectedWeekStartKey] = useState(() => getLocalDateKey(getStartOfWeek(new Date())));
-  const currentWeekStartKey = getLocalDateKey(getStartOfWeek(new Date()));
+  const currentDateKey = getLocalDateKey(now);
+  const currentWeekStartKey = getLocalDateKey(getStartOfWeek(now));
   const selectedWeekStart = useMemo(() => getStartOfWeek(selectedWeekStartKey), [selectedWeekStartKey]);
-  const todayUsage = useMemo(() => aggregateTokenUsageByDateKeys(records, [getLocalDateKey(new Date())])[0] || {
-    dateKey: getLocalDateKey(new Date()),
+  const todayUsage = useMemo(() => aggregateTokenUsageByDateKeys(records, [currentDateKey], now)[0] || {
+    dateKey: currentDateKey,
     label: '今天',
     shortLabel: '今天',
     promptTokens: 0,
@@ -125,7 +127,7 @@ function MountedTokenUsageIndicator() {
     totalTokens: 0,
     estimated: false,
     recordCount: 0,
-  }, [records]);
+  }, [records, currentDateKey, now]);
   const weekDailyUsage = useMemo(() => aggregateTokenUsageByWeek(records, selectedWeekStart), [records, selectedWeekStart]);
   const weekUsage = useMemo(() => sumTokenUsage(weekDailyUsage), [weekDailyUsage]);
   const latestRecord = records[0];
@@ -164,6 +166,14 @@ function MountedTokenUsageIndicator() {
       .sort((left, right) => right.tokens - left.tokens)
       .slice(0, 6);
   }, [weeklyRecords]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNow(new Date());
+    }, 60_000);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   function shiftSelectedWeek(offset: number) {
     setSelectedWeekStartKey((currentKey) => {

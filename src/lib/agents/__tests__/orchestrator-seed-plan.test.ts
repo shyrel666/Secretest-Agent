@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { resolveProjectQuizMode } from '@/lib/agents/orchestrator';
 import { buildSeedPlan, getDifficultyForIndex } from '@/lib/agents/seed-plan';
 
 describe('buildSeedPlan', () => {
@@ -34,5 +35,31 @@ describe('getDifficultyForIndex', () => {
       'medium', 'medium', 'medium', 'medium', 'medium',
       'hard', 'hard',
     ]);
+  });
+});
+
+describe('resolveProjectQuizMode', () => {
+  it('keeps standard-only generation inactive when sourceProject is omitted', () => {
+    const result = resolveProjectQuizMode({ language: 'java' });
+    assert.equal(result.success, true);
+    assert.equal(result.isProjectModeActive, false);
+    assert.equal(result.sourceProject, undefined);
+  });
+
+  it('activates project mode only for an explicit sourceProject', () => {
+    const result = resolveProjectQuizMode({ language: 'java', sourceProject: 'all', projectMode: 'source' });
+    assert.equal(result.success, true);
+    assert.equal(result.isProjectModeActive, true);
+    assert.equal(result.sourceProject, 'all');
+  });
+
+  it('rejects unknown project ids and non-Java source project requests', () => {
+    const unknownProject = resolveProjectQuizMode({ language: 'java', sourceProject: 'bad-project' });
+    assert.equal(unknownProject.success, false);
+    assert.match(unknownProject.error || '', /sourceProject/);
+
+    const cppProject = resolveProjectQuizMode({ language: 'cpp', sourceProject: 'YM_PT' });
+    assert.equal(cppProject.success, false);
+    assert.match(cppProject.error || '', /Java/);
   });
 });

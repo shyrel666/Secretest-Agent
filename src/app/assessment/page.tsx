@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useState, useEffect, useCallback } from 'react';
+import { Suspense, useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import type { TokenUsage } from '@/lib/token-usage';
 import { toast } from 'sonner';
@@ -84,6 +84,13 @@ function AssessmentPageContent() {
   const cachedLearningReportSessionKey = useAssessmentStore((s) => s.learningReportSessionKey);
   const setLearningReportCache = useAssessmentStore((s) => s.setLearningReportCache);
   const resetAssessment = useAssessmentStore((s) => s.reset);
+  const generationStartTime = useAssessmentStore((s) => s.generationStartTime);
+  const setGenerationStartTime = useAssessmentStore((s) => s.setGenerationStartTime);
+
+  // 讲解流的中断控制器：切题/切页时 abort，避免离开后仍往 store 追加文本污染新视图
+  const explanationAbortRef = useRef<AbortController | null>(null);
+  // 出题流的中断控制器：切页或重新触发时 abort，避免旧请求完成后回写测评状态
+  const generationAbortRef = useRef<AbortController | null>(null);
 
   // 仅 UI 瞬态状态（无需跨页面保留）
   const [isExplaining, setIsExplaining] = useState(false);
@@ -91,7 +98,6 @@ function AssessmentPageContent() {
   const [learningReport, setLearningReport] = useState<LearningReport | null>(null);
   const [learningReportStatus, setLearningReportStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [learningReportError, setLearningReportError] = useState('');
-  const [generationStartTime, setGenerationStartTime] = useState<number | null>(null);
 
   // 答题阶段每秒计时
   const [now, setNow] = useState(Date.now());
@@ -101,14 +107,21 @@ function AssessmentPageContent() {
     return () => clearInterval(id);
   }, [phase]);
 
+  // 出题计时基准由 generateQuestions 在进入 generating 阶段时写入 store 并持久化，
+  // 跨页面导航返回时不会丢失；离开 generating 阶段时清理，避免残留过期时间戳。
   useEffect(() => {
-    if (phase === 'generating' && generationStartTime === null) {
-      setGenerationStartTime(Date.now());
-    }
-    if (phase !== 'generating') {
+    if (phase !== 'generating' && generationStartTime !== null) {
       setGenerationStartTime(null);
     }
-  }, [phase, generationStartTime]);
+  }, [phase, generationStartTime, setGenerationStartTime]);
+
+  // 组件卸载（切到其他模块）时取消正在进行的流式请求，避免离开后仍往 store 追加文本
+  useEffect(() => {
+    return () => {
+      explanationAbortRef.current?.abort();
+      generationAbortRef.current?.abort();
+    };
+  }, []);
   const [isExplanationCopied, setIsExplanationCopied] = useState(false);
   const [availableKnowledgeTypes, setAvailableKnowledgeTypes] = useState<StandardType[]>([]);
   const [learningTopics, setLearningTopics] = useState<LearningTopic[]>([]);
@@ -328,6 +341,21 @@ function AssessmentPageContent() {
   }, []);
 
   useEffect(() => {
+    // 真实项目源码模式仅支持 Java 项目（source_code/ 下均为 Java，后端也会强制 java）。
+    // 无论知识库是否加载完成，都把语言锁定为 java，避免切页返回后顶部出题类型变成混合。
+    if (setupOptions.projectMode === 'project') {
+      if (setupOptions.language !== 'java') {
+        setSetupOptions((prev) => ({ ...prev, language: 'java' }));
+      }
+      return;
+    }
+
+    // 知识库类型尚未加载完成时不做语言回退：availableKnowledgeTypes 是本组件 useState，
+    // 切页返回时会重置为空。若此时按“未上传 Java 标准”降级，会把持久化的 java 误改成 mixed。
+    if (availableKnowledgeTypes.length === 0) {
+      return;
+    }
+
     if (setupOptions.language === 'java' && !hasJavaKnowledge) {
       setSetupOptions((prev) => ({
         ...prev,
@@ -355,7 +383,7 @@ function AssessmentPageContent() {
         language: getFallbackLanguage(availableKnowledgeTypes),
       }));
     }
-  }, [availableKnowledgeTypes, hasCppKnowledge, hasCsharpKnowledge, hasJavaKnowledge, hasMixedKnowledge, setupOptions.language, setSetupOptions]);
+  }, [availableKnowledgeTypes, hasCppKnowledge, hasCsharpKnowledge, hasJavaKnowledge, hasMixedKnowledge, setupOptions.language, setupOptions.projectMode, setSetupOptions]);
 
   const handleCopyExplanation = useCallback(async () => {
     if (!explanation) return;
@@ -385,6 +413,11 @@ function AssessmentPageContent() {
 
   // 生成题目
   const generateQuestions = useCallback(async () => {
+    generationAbortRef.current?.abort();
+    const controller = new AbortController();
+    generationAbortRef.current = controller;
+    const isActiveGeneration = () => generationAbortRef.current === controller && !controller.signal.aborted;
+
     setGenerationStartTime(Date.now());
     setPhase('generating');
     setGenerationStage({
@@ -411,6 +444,8 @@ function AssessmentPageContent() {
           language: setupOptions.language,
           totalQuestions: setupOptions.totalQuestions,
           vulnerabilityType: focusVulnerabilityType || undefined,
+          sourceProject: setupOptions.projectMode !== 'standard' ? setupOptions.sourceProject : undefined,
+          projectMode: setupOptions.projectMode !== 'standard' ? setupOptions.projectTaskMode : undefined,
           configs: {
             questionGenerator: questionGeneratorConfig,
             reviewer: reviewerConfig,
@@ -418,10 +453,20 @@ function AssessmentPageContent() {
           assessmentGeneration,
           connectionConfig,
         }),
+        signal: controller.signal,
       });
 
       if (!qResponse.ok) {
-        throw new Error('题目生成请求失败');
+        let message = '题目生成请求失败';
+        try {
+          const data = await qResponse.json();
+          if (typeof data?.error === 'string' && data.error.trim()) {
+            message = data.error;
+          }
+        } catch {
+          // 保留默认错误信息
+        }
+        throw new Error(message);
       }
 
       const reader = qResponse.body?.getReader();
@@ -447,7 +492,9 @@ function AssessmentPageContent() {
           const data = JSON.parse(payload);
 
           if (data.type === 'stage' && data.stage) {
-            setGenerationStage(data.stage);
+            if (isActiveGeneration()) {
+              setGenerationStage(data.stage);
+            }
             return;
           }
 
@@ -467,6 +514,7 @@ function AssessmentPageContent() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (!isActiveGeneration()) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -477,8 +525,12 @@ function AssessmentPageContent() {
         }
       }
 
-      if (buffer.trim()) {
+      if (isActiveGeneration() && buffer.trim()) {
         processSseLine(buffer.trim());
+      }
+
+      if (!isActiveGeneration()) {
+        return;
       }
 
       if (streamError) {
@@ -493,6 +545,10 @@ function AssessmentPageContent() {
       const generatedQuestions: Question[] = Array.isArray(finalResult.questions) ? finalResult.questions : [];
 
       if (generatedQuestions.length > 0) {
+        if (!isActiveGeneration()) {
+          return;
+        }
+
         setGenerationStage({
           label: '整理题目结果',
           detail: '正在汇总题目、记录消耗并进入测评…',
@@ -522,6 +578,10 @@ function AssessmentPageContent() {
         setShowFullExplanation(false);
         setIsExplanationCopied(false);
       } else {
+        if (!isActiveGeneration()) {
+          return;
+        }
+
         setGenerationStage({
           label: '生成失败',
           detail: '没有生成出有效题目，正在返回设置页…',
@@ -533,6 +593,18 @@ function AssessmentPageContent() {
         setPhase('setup');
       }
     } catch (error) {
+      if (controller.signal.aborted) {
+        if (generationAbortRef.current === controller) {
+          setGenerationStage({
+            label: '生成已取消',
+            detail: '出题请求已停止，正在返回设置页…',
+            progress: 100,
+          });
+          setPhase('setup');
+        }
+        return;
+      }
+
       console.error('Generate questions error:', error);
       const errorMessage = error instanceof Error ? error.message : '生成过程中出现异常，请稍后重试';
       setGenerationStage({
@@ -544,11 +616,20 @@ function AssessmentPageContent() {
         description: errorMessage,
       });
       setPhase('setup');
+    } finally {
+      if (generationAbortRef.current === controller) {
+        generationAbortRef.current = null;
+      }
     }
-  }, [addUsageRecord, setupOptions, focusVulnerabilityType, setPhase, setGenerationStage, setGenerationUsage, startQuizSession]);
+  }, [addUsageRecord, setupOptions, focusVulnerabilityType, setPhase, setGenerationStage, setGenerationUsage, setGenerationStartTime, startQuizSession]);
 
   // 获取讲解
   const getExplanation = useCallback(async (q: Question, answer: number, correct: boolean) => {
+    // 取消上一次尚未完成的讲解流，避免新旧讲解文本交错写入 store
+    explanationAbortRef.current?.abort();
+    const controller = new AbortController();
+    explanationAbortRef.current = controller;
+
     setIsExplaining(true);
     setExplanation('');
     setExplanationUsage(null);
@@ -569,6 +650,7 @@ function AssessmentPageContent() {
           config: explainerConfig,
           connectionConfig,
         }),
+        signal: controller.signal,
       });
 
       const reader = response.body?.getReader();
@@ -604,6 +686,8 @@ function AssessmentPageContent() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        // 主动取消后停止消费流，避免继续往 store 追加文本
+        if (controller.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -615,13 +699,20 @@ function AssessmentPageContent() {
       }
 
       // 流结束后，处理最后一行（可能没有换行符）
-      if (buffer.trim()) {
+      if (!controller.signal.aborted && buffer.trim()) {
         processSseLine(buffer.trim());
       }
     } catch (error) {
+      // 主动取消（切题/切页）不算异常，静默退出
+      if (controller.signal.aborted) return;
       console.error('Explanation error:', error);
     } finally {
-      setIsExplaining(false);
+      // 仅当本次请求仍是当前活跃的 controller 时才复位 isExplaining，
+      // 否则说明已被新一轮讲解取代，状态交由新一轮管理
+      if (explanationAbortRef.current === controller) {
+        setIsExplaining(false);
+        explanationAbortRef.current = null;
+      }
     }
   }, [addUsageRecord, currentQuestion, appendExplanation, setExplanationUsage, setExplanation]);
 
@@ -640,6 +731,9 @@ function AssessmentPageContent() {
 
   const navigateToQuestion = (index: number) => {
     if (index < 0 || index > answers.length || index >= questions.length) return;
+    // 切题时取消正在进行的讲解流，避免旧讲解继续往 store 追加文本污染新视图
+    explanationAbortRef.current?.abort();
+    setIsExplaining(false);
     setCurrentQuestion(index);
     if (index < answers.length) {
       // 回看已答题目
@@ -663,6 +757,9 @@ function AssessmentPageContent() {
   };
 
   const handleNext = () => {
+    // 进入下一题/完成测评前取消正在进行的讲解流
+    explanationAbortRef.current?.abort();
+    setIsExplaining(false);
     // 回看模式：直接前进
     if (isReviewingPast) {
       navigateToQuestion(currentQuestion + 1);
@@ -694,6 +791,8 @@ function AssessmentPageContent() {
   };
 
   const handleRestart = () => {
+    explanationAbortRef.current?.abort();
+    setIsExplaining(false);
     resetAssessment();
     setShowFullExplanation(false);
     setIsExplanationCopied(false);
@@ -718,6 +817,10 @@ function AssessmentPageContent() {
         availableKnowledgeCount={availableKnowledgeTypes.length}
         focusTopicTitle={focusTopicTitle || undefined}
         focusVulnerabilityType={focusVulnerabilityType || undefined}
+        projectMode={setupOptions.projectMode}
+        projectTaskMode={setupOptions.projectTaskMode}
+        onProjectModeChange={(mode) => setSetupOptions((prev) => ({ ...prev, projectMode: mode }))}
+        onProjectTaskModeChange={(mode) => setSetupOptions((prev) => ({ ...prev, projectTaskMode: mode }))}
       />
     );
   }

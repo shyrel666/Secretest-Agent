@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { AgentOrchestrator, AgentsConfig } from '@/lib/agents/orchestrator';
+import { AgentOrchestrator, AgentsConfig, resolveProjectQuizMode } from '@/lib/agents/orchestrator';
 import { HeaderUtils } from 'coze-coding-dev-sdk';
 import { resolveUserContext } from '@/lib/user-context';
-import { getAllQuestions, resolveQuestionBankUserId } from '@/lib/question-bank/sqlite-store';
+import {
+  getAllQuestions,
+  getAnswerCountByFindingSeedId,
+  getCoveredFindingSeedIds,
+  resolveQuestionBankUserId,
+} from '@/lib/question-bank/sqlite-store';
 import { getDocumentSections, isReadableKnowledgeTitle } from '@/lib/knowledge';
 import {
   getStandardTypeFromLanguageLabel,
@@ -10,6 +15,12 @@ import {
   type AssessmentLanguage,
   type StandardType,
 } from '@/lib/standards';
+import {
+  isProjectMode,
+  isSourceProjectSelection,
+  type ProjectMode,
+  type SourceProjectSelection,
+} from '@/lib/project-audit/types';
 
 function normalizeCoverageType(value?: string): string {
   return (value || '').toLowerCase().replace(/[\s\-_/()（）,，.:：]/g, '');
@@ -80,7 +91,7 @@ function resolveCoveredTypes(userId: string, assessmentLang?: AssessmentLanguage
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { 
+    const {
       action,
       language,
       difficulty,
@@ -95,10 +106,12 @@ export async function POST(request: NextRequest) {
       assessmentGeneration, // 测评生成性能配置
       connectionConfig, // SDK连接配置
       stream,
+      sourceProject,
+      projectMode,
     } = body;
 
     const customHeaders = HeaderUtils.extractForwardHeaders(request.headers);
-    
+
     // 使用传入的配置创建orchestrator
     const agentConfigs: AgentsConfig = configs || {};
     const orchestrator = new AgentOrchestrator(customHeaders, agentConfigs, connectionConfig, assessmentGeneration);
@@ -110,12 +123,58 @@ export async function POST(request: NextRequest) {
       userId: resolveQuestionBankUserId(rawUserCtx.userId),
     };
 
+    const resolvedLanguage = isAssessmentLanguage(language) ? language : undefined;
+    if (language !== undefined && !isAssessmentLanguage(language)) {
+      return NextResponse.json(
+        { error: `未知 language: ${String(language)}` },
+        { status: 400 },
+      );
+    }
+
+    const resolvedSourceProject: SourceProjectSelection | undefined = isSourceProjectSelection(sourceProject)
+      ? sourceProject
+      : undefined;
+    const resolvedProjectMode: ProjectMode = isProjectMode(projectMode) ? projectMode : 'source';
+    if (sourceProject !== undefined && !isSourceProjectSelection(sourceProject)) {
+      return NextResponse.json(
+        { error: `未知 sourceProject: ${String(sourceProject)}` },
+        { status: 400 },
+      );
+    }
+    if (projectMode !== undefined && !isProjectMode(projectMode)) {
+      return NextResponse.json(
+        { error: `未知 projectMode: ${String(projectMode)}` },
+        { status: 400 },
+      );
+    }
+    const projectModeResolution = resolveProjectQuizMode({
+      sourceProject: resolvedSourceProject,
+      projectMode: resolvedProjectMode,
+      language: resolvedLanguage,
+    });
+    if (!projectModeResolution.success) {
+      return NextResponse.json(
+        { error: projectModeResolution.error || '项目模式参数无效' },
+        { status: 400 },
+      );
+    }
+    const projectModeActive = projectModeResolution.isProjectModeActive;
+    const effectiveLanguage: AssessmentLanguage = projectModeActive
+      ? 'java'
+      : (resolvedLanguage || 'mixed');
+    const coveredFindingSeedIds = projectModeActive
+      ? getCoveredFindingSeedIds(userCtx.userId)
+      : [];
+    const answerCountBySeedId = projectModeActive
+      ? getAnswerCountByFindingSeedId(userCtx.userId)
+      : {};
+
     // 根据不同的action执行不同的操作
     switch (action) {
       case 'generateQuestion':
         // 生成单个审核通过的题目
         const qResult = await orchestrator.generateApprovedQuestion({
-          language: language || 'mixed',
+          language: effectiveLanguage,
           difficulty: difficulty || 'mixed',
           vulnerabilityType,
           excludedVulnerabilityTypes: Array.isArray(excludedVulnerabilityTypes)
@@ -141,6 +200,14 @@ export async function POST(request: NextRequest) {
         );
 
       case 'generateQuizSet':
+        const totalQuestionResolution = resolveTotalQuestions(totalQuestions);
+        if (!totalQuestionResolution.success) {
+          return NextResponse.json(
+            { error: totalQuestionResolution.error },
+            { status: 400 },
+          );
+        }
+
         if (stream) {
           const readableStream = new ReadableStream({
             start(controller) {
@@ -189,7 +256,9 @@ export async function POST(request: NextRequest) {
                     type: 'stage',
                     stage: {
                       label: '准备出题参数',
-                      detail: '正在读取模型配置与知识库状态…',
+                      detail: projectModeActive
+                        ? `正在读取模型配置与 ${resolvedSourceProject === 'all' ? '多' : resolvedSourceProject} 项目源码 seeds…`
+                        : '正在读取模型配置与知识库状态…',
                       progress: 8,
                     },
                   })) {
@@ -197,10 +266,14 @@ export async function POST(request: NextRequest) {
                   }
 
                   const streamedResult = await orchestrator.generateQuizSet({
-                    totalQuestions: totalQuestions || 8,
-                    language: language || 'mixed',
+                    totalQuestions: totalQuestionResolution.totalQuestions,
+                    language: effectiveLanguage,
                     vulnerabilityType,
-                    coveredVulnerabilityTypes: resolveCoveredTypes(userCtx.userId, language),
+                    coveredVulnerabilityTypes: resolveCoveredTypes(userCtx.userId, effectiveLanguage),
+                    sourceProject: projectModeResolution.sourceProject,
+                    projectMode: projectModeResolution.projectMode,
+                    coveredSeedIds: coveredFindingSeedIds,
+                    answerCountBySeedId,
                     shouldAbort: () => closed || request.signal.aborted,
                     onStage: (stage) => {
                       send({ type: 'stage', stage });
@@ -259,10 +332,14 @@ export async function POST(request: NextRequest) {
 
         // 生成一套测评题
         const setResult = await orchestrator.generateQuizSet({
-          totalQuestions: totalQuestions || 8,
-          language: language || 'mixed',
+          totalQuestions: totalQuestionResolution.totalQuestions,
+          language: effectiveLanguage,
           vulnerabilityType,
-          coveredVulnerabilityTypes: resolveCoveredTypes(userCtx.userId, language),
+          coveredVulnerabilityTypes: resolveCoveredTypes(userCtx.userId, effectiveLanguage),
+          sourceProject: projectModeResolution.sourceProject,
+          projectMode: projectModeResolution.projectMode,
+          coveredSeedIds: coveredFindingSeedIds,
+          answerCountBySeedId,
         });
 
         if (setResult.success) {
@@ -364,4 +441,34 @@ function getPrimaryQuizGenerationError(errors?: string[]): string {
   return errors.find((error) => error.includes('题目数量不足'))
     || errors[errors.length - 1]
     || '题目集生成失败';
+}
+
+function isAssessmentLanguage(value: unknown): value is AssessmentLanguage {
+  return value === 'java' || value === 'cpp' || value === 'csharp' || value === 'mixed';
+}
+
+function resolveTotalQuestions(value: unknown): {
+  success: true;
+  totalQuestions: number;
+} | {
+  success: false;
+  error: string;
+} {
+  if (value === undefined || value === null) {
+    return { success: true, totalQuestions: 8 };
+  }
+
+  const parsed = typeof value === 'number'
+    ? value
+    : Number(String(value).trim());
+  const allowedCounts = new Set([3, 5, 8, 10]);
+
+  if (!Number.isInteger(parsed) || !allowedCounts.has(parsed)) {
+    return {
+      success: false,
+      error: 'totalQuestions 只能是 3、5、8 或 10',
+    };
+  }
+
+  return { success: true, totalQuestions: parsed };
 }

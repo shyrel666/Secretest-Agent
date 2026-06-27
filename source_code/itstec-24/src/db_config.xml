@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+	<defaultdb> 
+		<jdbcProvider>
+		    <driver>com.mysql.cj.jdbc.Driver</driver>
+		    <serverURL>jdbc:mysql://101.101.101.101:3306/itstec?useOldAliasMetadataBehavior=true</serverURL>
+			<username>itstec</username>
+			<password>DNFPLJUj</password>	
+		</jdbcProvider>
+	</defaultdb>
+</config>
