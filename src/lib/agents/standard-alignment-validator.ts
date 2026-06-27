@@ -80,7 +80,9 @@ export function validateStandardAlignedQuestion(question: Question): StandardAli
     issues.push('代码片段过短，缺少可测量的审计场景');
   }
 
-  const leak = findAnswerLeak(sanitizedCode, question.vulnerabilityType);
+  const leak = findAnswerLeak(sanitizedCode, question.vulnerabilityType, {
+    allowVulnerabilityTypeTerms: !isProjectSourceQuestion(question),
+  });
   if (leak) {
     issues.push(`代码存在提示性命名或文本，可能泄露答案: ${leak}`);
   }
@@ -109,7 +111,11 @@ function isCodeTooSmallForAuditScenario(code: string): boolean {
   return code.length < 80 || meaningfulLines.length < 3;
 }
 
-function findAnswerLeak(code: string, vulnerabilityType: string): string | null {
+function findAnswerLeak(
+  code: string,
+  vulnerabilityType: string,
+  options: { allowVulnerabilityTypeTerms?: boolean } = {},
+): string | null {
   const searchableCode = removeStringLiteralValues(code);
   const normalizedCode = normalizeForLeakSearch(searchableCode);
   const normalizedType = normalizeForLeakSearch(vulnerabilityType);
@@ -126,9 +132,11 @@ function findAnswerLeak(code: string, vulnerabilityType: string): string | null 
     return normalizedLeakMatch[0];
   }
 
-  const typeTokens = normalizedType
-    .split(/[^a-z0-9\u4e00-\u9fff]+/)
-    .filter((token) => token.length >= 3 && token !== 'sql');
+  const typeTokens = options.allowVulnerabilityTypeTerms === false
+    ? []
+    : normalizedType
+      .split(/[^a-z0-9\u4e00-\u9fff]+/)
+      .filter((token) => token.length >= 3 && token !== 'sql');
 
   for (const token of typeTokens) {
     if (normalizedCode.includes(token)) {
@@ -137,6 +145,10 @@ function findAnswerLeak(code: string, vulnerabilityType: string): string | null 
   }
 
   return null;
+}
+
+function isProjectSourceQuestion(question: Question): boolean {
+  return Boolean(question.sourceProject && question.findingSeedId);
 }
 
 function removeStringLiteralValues(code: string): string {

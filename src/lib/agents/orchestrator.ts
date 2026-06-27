@@ -354,10 +354,14 @@ export class AgentOrchestrator {
         projectSeed: entry,
       }))
       : buildSeedPlan(total, coverageTargets);
-    // 补题阶段只允许在"未通过"的 seed 中重选，避免和 initialProjectPlan 中的 seed 重复
-    const usedProjectSeedIds = new Set<string>(
-      isProjectModeActive ? initialProjectPlan.map((entry) => entry.seed.id) : [],
-    );
+    // 项目补题只排除已接受或当前批次正在生成的 seed。首轮失败的 seed 允许继续重试，
+    // 避免把“未生成成功”的源码点永久烧掉，导致补题池很快耗尽。
+    const acceptedProjectSeedIds = new Set<string>();
+    const reservedProjectSeedIds = new Set<string>();
+    const getUnavailableProjectSeedIds = () => new Set<string>([
+      ...acceptedProjectSeedIds,
+      ...reservedProjectSeedIds,
+    ]);
     let supplementAttemptCount = 0;
     let duplicateTypeRejectCount = 0;
     let duplicateSimilarityRejectCount = 0;
@@ -524,6 +528,9 @@ export class AgentOrchestrator {
       }
 
       seenQuestionKeys.add(dedupeKey);
+      if (reviewResult.question.findingSeedId) {
+        acceptedProjectSeedIds.add(reviewResult.question.findingSeedId);
+      }
       questions.push(shuffleQuestionOptions(reviewResult.question));
     }
 
@@ -573,12 +580,12 @@ export class AgentOrchestrator {
             const candidate = pickProjectSupplementSeed({
               sourceProject: sourceProject!,
               projectMode,
-              excludedSeedIds: usedProjectSeedIds,
+              excludedSeedIds: getUnavailableProjectSeedIds(),
               difficulty: getDifficultyForIndex(targetQuestionIndex, total),
             });
             if (candidate) {
               projectSeed = candidate;
-              usedProjectSeedIds.add(candidate.seed.id);
+              reservedProjectSeedIds.add(candidate.seed.id);
             }
           }
 
@@ -600,13 +607,18 @@ export class AgentOrchestrator {
 
           return {
             questionNumber: targetQuestionIndex + 1,
+            projectSeedId: projectSeed?.seed.id,
             result,
           };
         }),
       );
       supplementAttemptCount += supplementBatchSize;
 
-      for (const { questionNumber, result } of supplementResults) {
+      for (const { questionNumber, projectSeedId, result } of supplementResults) {
+        if (projectSeedId) {
+          reservedProjectSeedIds.delete(projectSeedId);
+        }
+
         if (questions.length >= total || params.shouldAbort?.()) {
           break;
         }
@@ -646,6 +658,9 @@ export class AgentOrchestrator {
         }
 
         seenQuestionKeys.add(dedupeKey);
+        if (result.question.findingSeedId || projectSeedId) {
+          acceptedProjectSeedIds.add(result.question.findingSeedId || projectSeedId!);
+        }
         questions.push(shuffleQuestionOptions(result.question));
       }
 

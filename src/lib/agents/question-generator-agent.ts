@@ -298,6 +298,11 @@ ${knowledgeContext}${projectContextPrompt}
           continue;
         }
 
+        if (params.projectSeed && !hasCompleteProjectMetadata(validation.question)) {
+          schemaIssues.push(`题目 ${index + 1}: 项目源码题必须输出 sourceProject、auditTaskType、findingSeedId 和 sourceRefs`);
+          continue;
+        }
+
         const alignment = validateStandardAlignedQuestion(validation.question);
         if (!alignment.success) {
           schemaIssues.push(`题目 ${index + 1}: ${alignment.issues.join('；')}`);
@@ -305,7 +310,25 @@ ${knowledgeContext}${projectContextPrompt}
         }
 
         // 项目源码题：补充 project grounding 校验
-        if (validation.question.sourceProject && validation.question.findingSeedId) {
+        if (params.projectSeed) {
+          if (validation.question.findingSeedId !== params.projectSeed.seed.id) {
+            schemaIssues.push(`题目 ${index + 1}: findingSeedId 必须是 ${params.projectSeed.seed.id}`);
+            continue;
+          }
+          if (validation.question.auditTaskType !== params.projectSeed.taskType) {
+            schemaIssues.push(`题目 ${index + 1}: auditTaskType 必须是 ${params.projectSeed.taskType}`);
+            continue;
+          }
+          const grounding = validateProjectGroundedQuestion(
+            validation.question,
+            params.projectSeed.seed,
+            { mode: params.projectSeed.taskType === 'variant' ? 'variant' : 'source' },
+          );
+          if (!grounding.success) {
+            schemaIssues.push(`题目 ${index + 1}: ${grounding.issues.join('；')}`);
+            continue;
+          }
+        } else if (validation.question.sourceProject && validation.question.findingSeedId) {
           const seed = getProjectFindingSeed(validation.question.findingSeedId);
           const grounding = validateProjectGroundedQuestion(
             validation.question,
@@ -593,6 +616,16 @@ function containsExcludedVulnerability(content: string, excludedTypes: string[])
     // 知识片段层面无需用模糊匹配二次拦截。
     return normalizedType.length > 0 && normalizedContent === normalizedType;
   });
+}
+
+function hasCompleteProjectMetadata(question: Question): boolean {
+  return Boolean(
+    question.sourceProject
+    && question.auditTaskType
+    && question.findingSeedId
+    && question.sourceRefs
+    && question.sourceRefs.length > 0,
+  );
 }
 
 function isCodeTooSimilarToKnowledge(
