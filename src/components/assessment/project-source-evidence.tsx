@@ -32,6 +32,7 @@ interface ProjectSourceEvidenceProps {
   findingTitle?: string;
   sourceRefs?: ProjectSourceRef[];
   evidenceFlow?: ProjectEvidenceStep[];
+  revealEvidenceFlow?: boolean;
   className?: string;
 }
 
@@ -64,6 +65,7 @@ export function ProjectSourceEvidence({
   findingTitle,
   sourceRefs,
   evidenceFlow,
+  revealEvidenceFlow = false,
   className,
 }: ProjectSourceEvidenceProps) {
   if (!projectId) {
@@ -125,7 +127,7 @@ export function ProjectSourceEvidence({
         </div>
       ) : null}
 
-      {evidenceFlow && evidenceFlow.length > 0 ? (
+      {revealEvidenceFlow && evidenceFlow && evidenceFlow.length > 0 ? (
         <div className="mt-3">
           <p className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
             <Workflow className="h-3 w-3" />

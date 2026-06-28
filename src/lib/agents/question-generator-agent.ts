@@ -9,14 +9,14 @@ import { parseQuestionOutput } from './output-schemas';
 import { sanitizeQuestionCode } from './code-sanitizer';
 import { validateStandardAlignedQuestion } from './standard-alignment-validator';
 import { validateProjectGroundedQuestion } from '@/lib/project-audit/project-grounding-validator';
-import { getProjectFindingSeed } from '@/lib/project-audit/source-code-findings';
+import { getProjectFindingSeed } from '@/lib/project-audit/finding-seed-repository';
 import type {
   ProjectAuditTaskType,
   ProjectEvidenceStep,
   ProjectId,
   ProjectSourceRef,
 } from '@/lib/project-audit/types';
-import { buildProjectQuestionContext, formatProjectContextForPrompt } from '@/lib/project-audit/project-context-builder';
+import { buildProjectQuestionContext, formatProjectContextBriefForPrompt } from '@/lib/project-audit/project-context-builder';
 
 // 出题Agent的系统提示词
 const QUESTION_GENERATOR_PROMPT = `你是一位专业的代码安全审计出题专家，精通GB/T 34944-2017《Java语言源代码漏洞测试规范》、GB/T 34943-2017《C/C++语言源代码漏洞测试规范》以及GB/T 34946-2017《C#语言源代码漏洞测试规范》。
@@ -93,13 +93,18 @@ export interface Question {
   evidenceFlow?: ProjectEvidenceStep[];
 }
 
+const QUESTION_GENERATION_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class QuestionGeneratorAgent {
   private llmClient: LLMClient;
   private toolbox: InternalMcpToolbox;
   private config: ModelConfig;
 
   constructor(customHeaders?: Record<string, string>, config?: ModelConfig, cozeConfig?: CozeConfig) {
-    const configInstance = new Config(cozeConfig);
+    const configInstance = new Config({
+      ...cozeConfig,
+      timeout: cozeConfig?.timeout ?? QUESTION_GENERATION_TIMEOUT_MS,
+    });
     this.llmClient = new LLMClient(configInstance, customHeaders);
     this.toolbox = new InternalMcpToolbox({
       apiKey: cozeConfig?.apiKey || process.env.COZE_WORKLOAD_IDENTITY_API_KEY || '',
@@ -118,6 +123,7 @@ export class QuestionGeneratorAgent {
     targetClauseNumber?: string;
     excludedVulnerabilityTypes?: string[];
     coveredVulnerabilityTypes?: string[];
+    coverageTargets?: Array<{ title?: string; clauseNumber?: string }>;
     count?: number;
     projectSeed?: {
       seed: import('@/lib/project-audit/types').ProjectAuditFindingSeed;
@@ -135,6 +141,8 @@ export class QuestionGeneratorAgent {
     retrievalTrace?: RetrievalTraceItem[];
     error?: string;
   }> {
+    let llmInvocationUsage: TokenUsage | undefined;
+
     try {
       const excludedTypes = params.excludedVulnerabilityTypes || [];
       // 项目源码模式：漏洞类型由 seed 固定，不同 seed 可能共享同一类型（如多条 SQL 注入 seed）。
@@ -210,19 +218,27 @@ export class QuestionGeneratorAgent {
         }
       }
 
-      const knowledgeContext = selectKnowledgeContext(knowledgeCandidates, 6)
+      const knowledgeContext = selectKnowledgeContext(knowledgeCandidates, projectContext ? 2 : 6)
         .map((item, index) => {
           const clauseTag = [
             item.clauseNumber && `条款${item.clauseNumber}`,
             item.sectionPath,
           ].filter(Boolean).join(' — ');
-          return `[知识片段${index + 1}｜文档${item.docId}｜相似度${item.score.toFixed(3)}${clauseTag ? `｜${clauseTag}` : ''}]\n${item.content}`;
+          const content = projectContext
+            ? limitPromptText(item.content, 1200)
+            : item.content;
+          return `[知识片段${index + 1}｜文档${item.docId}｜相似度${item.score.toFixed(3)}${clauseTag ? `｜${clauseTag}` : ''}]\n${content}`;
         })
         .join('\n\n---\n\n');
 
       // 2. 使用LLM生成题目
+      const coverageTargetsPrompt = params.coverageTargets && params.coverageTargets.length > 0
+        ? `\n- 本批优先覆盖这些候选条款/漏洞方向，每道题尽量选择不同项：${params.coverageTargets
+          .map((target, index) => `${index + 1}. ${target.title || '未命名条款'}${target.clauseNumber ? `(${target.clauseNumber})` : ''}`)
+          .join('；')}`
+        : '';
       const projectContextPrompt = projectContext
-        ? `\n\n## 源码项目上下文（必须基于此出题）\n${formatProjectContextForPrompt(projectContext)}\n\n## 源码项目模式额外约束\n1. 优先使用提供的真实源码片段，不能改变项目名、文件路径、方法名、关键调用链和危险 sink。\n2. 若题型为 variant，只能变更业务表述和局部变量，必须保留 seed 的漏洞模式、source -> processing -> sink 结构。\n3. question 必须让用户完成代码审计任务，而不是只问泛化漏洞名称。\n4. explanation 必须引用源码项目名、文件路径、方法名、关键代码证据和 GB/T 条款。\n5. 输出 JSON 中必须额外包含 sourceProject / auditTaskType / findingSeedId / sourceRefs / evidenceFlow 字段：\n   - sourceProject 必须是 ${projectContext.project.id}\n   - auditTaskType 必须是 ${projectContext.taskType}\n   - findingSeedId 必须是 ${projectContext.seed.id}\n   - 当 auditTaskType 是 variant 时，必须额外输出 variantOfFindingId，且值必须是 ${projectContext.seed.id}；非 variant 题可省略\n   - sourceRefs 必须是 seed.sourceRefs 的子集且非空\n   - evidenceFlow 沿用 seed.evidenceFlow（可保持原样）\n6. 标准引用必须使用 ${projectContext.seed.standardReference}，禁止替换。\n7. 正确答案必须基于源码中真实存在的危险调用或缺失控制，不要虚构文件或方法。\n`
+        ? `\n\n## 源码项目审计 Brief（必须基于此出题）\n${formatProjectContextBriefForPrompt(projectContext)}\n\n## 源码项目模式硬性约束\n1. 必须调用 brief 中的项目事实来设计题干、选项和解析，不能只复述固定模板。\n2. source/trace/fix/falsePositive 模式必须围绕真实源码片段提问；variant 模式才允许同构改写业务和变量。\n3. question 必须是审计任务描述，不能直接问“这是什么漏洞”，也不能泄露 ${projectContext.seed.vulnerabilityType}。\n4. options 必须是 4 个同语法形态、长度接近的审计结论；正确项不能因句式、长度或术语密度显得特殊。\n5. explanation 必须引用项目、文件/方法、关键代码证据和 ${projectContext.seed.standardReference}。\n6. vulnerabilityType 必须填写 ${projectContext.seed.vulnerabilityType}；standardReference 必须填写 ${projectContext.seed.standardReference}。\n7. sourceProject/auditTaskType/findingSeedId 如输出，必须分别是 ${projectContext.project.id}/${projectContext.taskType}/${projectContext.seed.id}；sourceRefs/evidenceFlow 可省略，后端会绑定可信元数据。\n`
         : '';
 
       const messages = [
@@ -236,6 +252,7 @@ export class QuestionGeneratorAgent {
 - 难度：${params.difficulty === 'mixed' ? '随机分布' : params.difficulty || '随机'}
 ${params.vulnerabilityType ? `- 漏洞类型：${params.vulnerabilityType}` : ''}
 ${params.targetClauseNumber ? `- 目标标准条款：${params.targetClauseNumber}（必须围绕该条款出题，standardReference 必须引用该条款）` : ''}
+${coverageTargetsPrompt}
 - 必须只使用下面提供的知识片段，不允许脱离内部知识库自由发挥
 - 本轮已出过的漏洞类型，禁止重复：${excludedTypes.length > 0 ? excludedTypes.join('、') : '无'}
 - 如果知识片段覆盖多个漏洞类型，优先选择与已出类型不同、条款清晰的一类
@@ -253,6 +270,13 @@ ${knowledgeContext}${projectContextPrompt}
       ];
 
       const response = await this.llmClient.invoke(messages, toLLMConfig(this.config));
+      llmInvocationUsage = sumTokenUsage([
+        toolSearch.usage,
+        createEstimatedUsage({
+          messages,
+          completionText: response.content,
+        }),
+      ]);
 
       // 3. 解析生成的题目
       const content = response.content.trim();
@@ -268,10 +292,26 @@ ${knowledgeContext}${projectContextPrompt}
       const jsonStr = extractJson(cleaned);
       if (!jsonStr) {
         console.error('无法从LLM输出中提取JSON，原始内容前200字符:', content.slice(0, 200));
-        return { success: false, error: '模型返回内容无法解析为JSON，请重试' };
+        return {
+          success: false,
+          usage: llmInvocationUsage,
+          retrievalTrace: toolSearch.retrievalTrace,
+          error: '模型返回内容无法解析为JSON，请重试',
+        };
       }
 
-      const parsed = JSON.parse(jsonStr);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch (error) {
+        return {
+          success: false,
+          usage: llmInvocationUsage,
+          retrievalTrace: toolSearch.retrievalTrace,
+          error: error instanceof Error ? `模型返回JSON解析失败：${error.message}` : '模型返回JSON解析失败',
+        };
+      }
+
       const questions = Array.isArray(parsed) ? parsed : [parsed];
       const schemaIssues: string[] = [];
 
@@ -291,7 +331,7 @@ ${knowledgeContext}${projectContextPrompt}
             : `q_${Date.now()}_${index}`,
           code: sanitizeQuestionCode(String(candidate.code || '')),
           standardReference: cleanStandardReference(String(candidate.standardReference || '')),
-        });
+        }, params.projectSeed);
 
         if (!validation.success) {
           schemaIssues.push(`题目 ${index + 1}: ${validation.issues.join('；')}`);
@@ -401,6 +441,7 @@ ${knowledgeContext}${projectContextPrompt}
       if (validatedQuestions.length === 0) {
         return {
           success: false,
+          usage: llmInvocationUsage,
           retrievalTrace: toolSearch.retrievalTrace,
           citations: Array.from(citationsMap.values()),
           grounding: {
@@ -414,13 +455,7 @@ ${knowledgeContext}${projectContextPrompt}
       return {
         success: true,
         questions: validatedQuestions,
-        usage: sumTokenUsage([
-          toolSearch.usage,
-          createEstimatedUsage({
-            messages,
-            completionText: response.content,
-          }),
-        ]),
+        usage: llmInvocationUsage,
         citations: Array.from(citationsMap.values()),
         grounding: {
           grounded: true,
@@ -432,6 +467,7 @@ ${knowledgeContext}${projectContextPrompt}
       console.error('Question generation error:', error);
       return {
         success: false,
+        usage: llmInvocationUsage,
         error: error instanceof Error ? error.message : '题目生成失败',
       };
     }
@@ -605,6 +641,14 @@ function buildMissingStandardError(
 function selectKnowledgeContext(results: SearchResultItem[], limit: number): SearchResultItem[] {
   const topResults = results.slice(0, Math.min(results.length, 12));
   return shuffleArray(topResults).slice(0, limit);
+}
+
+function limitPromptText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, maxChars).trimEnd()}\n...<knowledge truncated for prompt brevity>`;
 }
 
 function containsExcludedVulnerability(content: string, excludedTypes: string[]): boolean {

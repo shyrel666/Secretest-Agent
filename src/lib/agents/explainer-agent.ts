@@ -564,13 +564,18 @@ type StructuredLearningLessonStreamEvent =
       qualityWarnings: string[];
     };
 
+const EXPLAIN_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class ExplainerAgent {
   private llmClient: LLMClient;
   private toolbox: InternalMcpToolbox;
   private config: ModelConfig;
 
   constructor(customHeaders?: Record<string, string>, config?: ModelConfig, cozeConfig?: CozeConfig) {
-    const configInstance = new Config(cozeConfig);
+    const configInstance = new Config({
+      ...cozeConfig,
+      timeout: cozeConfig?.timeout ?? EXPLAIN_TIMEOUT_MS,
+    });
     this.llmClient = new LLMClient(configInstance, customHeaders);
     this.toolbox = new InternalMcpToolbox({
       apiKey: cozeConfig?.apiKey || process.env.COZE_WORKLOAD_IDENTITY_API_KEY || '',

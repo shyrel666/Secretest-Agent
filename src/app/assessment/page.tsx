@@ -40,12 +40,49 @@ const GENERATION_FLOW_STAGES = [
   },
 ] as const;
 
+const SSE_READ_TIMEOUT_MS = 30 * 1000;
+
 const pendingLearningReportRequests = new Map<string, Promise<LearningReport>>();
 
 function resolveGenerationStageKey(label: string): typeof GENERATION_FLOW_STAGES[number]['key'] {
   if (label.includes('准备')) return 'setup';
   if (label.includes('生成') || label.includes('审核') || label.includes('检索') || label.includes('补齐')) return 'generation';
   return 'finalize';
+}
+
+function normalizeStreamUsage(value: unknown): TokenUsage | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const raw = value as Partial<TokenUsage>;
+  const promptTokens = Number(raw.promptTokens || 0);
+  const completionTokens = Number(raw.completionTokens || 0);
+  const totalTokens = Number(raw.totalTokens || promptTokens + completionTokens);
+
+  if (![promptTokens, completionTokens, totalTokens].every(Number.isFinite) || totalTokens <= 0) {
+    return null;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimated: Boolean(raw.estimated),
+  };
+}
+
+function getUsageDelta(total: TokenUsage, alreadyRecorded: TokenUsage): TokenUsage {
+  const promptTokens = Math.max(0, total.promptTokens - alreadyRecorded.promptTokens);
+  const completionTokens = Math.max(0, total.completionTokens - alreadyRecorded.completionTokens);
+  const totalTokens = Math.max(0, total.totalTokens - alreadyRecorded.totalTokens);
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    estimated: total.estimated || alreadyRecorded.estimated,
+  };
 }
 
 function AssessmentPageContent() {
@@ -433,6 +470,55 @@ function AssessmentPageContent() {
     const reviewerConfig = getAgentConfig('reviewer');
     const connectionConfig = getConnectionConfig();
     const assessmentGeneration = useAIConfigStore.getState().getAssessmentGenerationConfig();
+    const generationModelLabel = getCombinedModelLabel([questionGeneratorConfig.model, reviewerConfig.model]);
+    let streamedUsageTotal: TokenUsage | null = null;
+    const recordUsageDelta = (usage: unknown, action: string) => {
+      const nextUsage = normalizeStreamUsage(usage);
+      if (!nextUsage || !hasTokenUsage(nextUsage)) {
+        return;
+      }
+
+      streamedUsageTotal = sumTokenUsage([streamedUsageTotal, nextUsage]);
+      setGenerationUsage(streamedUsageTotal);
+      addUsageRecord({
+        feature: 'assessment',
+        action,
+        modelLabel: generationModelLabel,
+        ...nextUsage,
+      });
+    };
+    const recordFinalUsage = (usage: unknown, action: string) => {
+      const finalUsage = normalizeStreamUsage(usage);
+      if (!finalUsage || !hasTokenUsage(finalUsage)) {
+        return;
+      }
+
+      if (streamedUsageTotal && hasTokenUsage(streamedUsageTotal)) {
+        const deltaUsage = getUsageDelta(finalUsage, streamedUsageTotal);
+        streamedUsageTotal = finalUsage;
+        setGenerationUsage(finalUsage);
+
+        if (hasTokenUsage(deltaUsage)) {
+          addUsageRecord({
+            feature: 'assessment',
+            action: `${action}（汇总补差）`,
+            modelLabel: generationModelLabel,
+            ...deltaUsage,
+          });
+        }
+        return;
+      }
+
+      streamedUsageTotal = finalUsage;
+      setGenerationUsage(finalUsage);
+      addUsageRecord({
+        feature: 'assessment',
+        action,
+        modelLabel: generationModelLabel,
+        ...finalUsage,
+      });
+    };
+    let readTimedOut = false;
 
     try {
       const qResponse = await fetch('/api/agent', {
@@ -498,6 +584,11 @@ function AssessmentPageContent() {
             return;
           }
 
+          if (data.type === 'usage' && data.usage) {
+            recordUsageDelta(data.usage, '生成测评题（进行中）');
+            return;
+          }
+
           if (data.type === 'result' && data.result) {
             qData = data.result;
             return;
@@ -505,14 +596,37 @@ function AssessmentPageContent() {
 
           if (data.type === 'error' && data.error) {
             streamError = data.error;
+            if (data.usage) {
+              recordFinalUsage(data.usage, '生成测评题（失败）');
+            }
           }
         } catch {
           // 忽略解析错误
         }
       };
 
+      let readTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      const resetReadTimeout = () => {
+        if (readTimeoutId) {
+          clearTimeout(readTimeoutId);
+          readTimeoutId = null;
+        }
+        readTimeoutId = setTimeout(() => {
+          if (!controller.signal.aborted) {
+            readTimedOut = true;
+            controller.abort();
+          }
+        }, SSE_READ_TIMEOUT_MS);
+      };
+
+      resetReadTimeout();
+
       while (true) {
         const { done, value } = await reader.read();
+        if (readTimeoutId) {
+          clearTimeout(readTimeoutId);
+          readTimeoutId = null;
+        }
         if (done) break;
         if (!isActiveGeneration()) break;
 
@@ -523,6 +637,13 @@ function AssessmentPageContent() {
         for (const line of lines) {
           processSseLine(line);
         }
+
+        resetReadTimeout();
+      }
+
+      if (readTimeoutId) {
+        clearTimeout(readTimeoutId);
+        readTimeoutId = null;
       }
 
       if (isActiveGeneration() && buffer.trim()) {
@@ -534,7 +655,15 @@ function AssessmentPageContent() {
       }
 
       if (streamError) {
-        throw new Error(streamError);
+        setGenerationStage({
+          label: '生成失败',
+          detail: `${streamError}。请重试或返回配置调整参数。`,
+          progress: 100,
+        });
+        toast.error('题目生成失败', {
+          description: streamError,
+        });
+        return;
       }
 
       const finalResult: {
@@ -555,16 +684,7 @@ function AssessmentPageContent() {
           progress: 95,
         });
 
-        const nextUsage = finalResult.usage ? sumTokenUsage([finalResult.usage]) : null;
-        setGenerationUsage(nextUsage);
-        if (nextUsage && hasTokenUsage(nextUsage)) {
-          addUsageRecord({
-            feature: 'assessment',
-            action: `生成${generatedQuestions.length}道测评题`,
-            modelLabel: getCombinedModelLabel([questionGeneratorConfig.model, reviewerConfig.model]),
-            ...nextUsage,
-          });
-        }
+        recordFinalUsage(finalResult.usage, `生成${generatedQuestions.length}道测评题`);
         const nextStartTime = Date.now();
         setGenerationStage({
           label: '完成',
@@ -584,15 +704,26 @@ function AssessmentPageContent() {
 
         setGenerationStage({
           label: '生成失败',
-          detail: '没有生成出有效题目，正在返回设置页…',
+          detail: '没有生成出有效题目。请重试或返回配置调整参数。',
           progress: 100,
         });
         toast.error('题目生成失败', {
           description: '请确保知识库中已导入标准文档',
         });
-        setPhase('setup');
       }
     } catch (error) {
+      if (readTimedOut && generationAbortRef.current === controller) {
+        setGenerationStage({
+          label: '连接超时',
+          detail: '出题流超过 30 秒未收到数据，已自动中断。请重试或返回配置调整参数。',
+          progress: 100,
+        });
+        toast.error('出题连接超时', {
+          description: '长时间未收到服务端数据，请检查网络或稍后重试',
+        });
+        return;
+      }
+
       if (controller.signal.aborted) {
         if (generationAbortRef.current === controller) {
           setGenerationStage({
@@ -609,13 +740,12 @@ function AssessmentPageContent() {
       const errorMessage = error instanceof Error ? error.message : '生成过程中出现异常，请稍后重试';
       setGenerationStage({
         label: '生成失败',
-        detail: `${errorMessage}，正在返回设置页…`,
+        detail: `${errorMessage}。请重试或返回配置调整参数。`,
         progress: 100,
       });
       toast.error('题目生成失败', {
         description: errorMessage,
       });
-      setPhase('setup');
     } finally {
       if (generationAbortRef.current === controller) {
         generationAbortRef.current = null;
@@ -798,6 +928,13 @@ function AssessmentPageContent() {
     setIsExplanationCopied(false);
   };
 
+  const handleBackToGenerationSetup = useCallback(() => {
+    generationAbortRef.current?.abort();
+    generationAbortRef.current = null;
+    setPhase('setup');
+    setGenerationStartTime(null);
+  }, [setGenerationStartTime, setPhase]);
+
   const quizElapsedMs = Math.max(0, now - startTime);
 
   // Setup Phase — 与 Agent 工作区同壳配置页
@@ -818,8 +955,10 @@ function AssessmentPageContent() {
         focusTopicTitle={focusTopicTitle || undefined}
         focusVulnerabilityType={focusVulnerabilityType || undefined}
         projectMode={setupOptions.projectMode}
+        sourceProject={setupOptions.sourceProject}
         projectTaskMode={setupOptions.projectTaskMode}
         onProjectModeChange={(mode) => setSetupOptions((prev) => ({ ...prev, projectMode: mode }))}
+        onSourceProjectChange={(sourceProject) => setSetupOptions((prev) => ({ ...prev, sourceProject }))}
         onProjectTaskModeChange={(mode) => setSetupOptions((prev) => ({ ...prev, projectTaskMode: mode }))}
       />
     );
@@ -837,6 +976,8 @@ function AssessmentPageContent() {
         flowStages={GENERATION_FLOW_STAGES}
         questionCount={setupOptions.totalQuestions}
         languageLabel={getLanguageLabel(setupOptions.language)}
+        onRetry={generateQuestions}
+        onBackToSetup={handleBackToGenerationSetup}
       />
     );
   }

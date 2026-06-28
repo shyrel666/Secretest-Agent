@@ -32,6 +32,9 @@ export interface ProjectQuestionContextOptions {
   tolerateReadErrors?: boolean;
 }
 
+const BRIEF_SOURCE_SNIPPET_LIMIT = 4;
+const BRIEF_SOURCE_SNIPPET_CHAR_LIMIT = 900;
+
 export function buildProjectQuestionContext(
   seed: ProjectAuditFindingSeed,
   taskType: ProjectAuditTaskType,
@@ -173,6 +176,76 @@ export function formatProjectContextForPrompt(context: ProjectQuestionContext): 
   return sections.join('\n');
 }
 
+export function formatProjectContextBriefForPrompt(context: ProjectQuestionContext): string {
+  const { project, seed, taskType, sourceSnippets } = context;
+  const sections: string[] = [];
+
+  sections.push('PROJECT_AUDIT_BRIEF');
+  sections.push(`project=${project.id} (${project.name})`);
+  sections.push(`language=${project.language}`);
+  sections.push(`findingSeedId=${seed.id}`);
+  sections.push(`taskType=${taskType}`);
+  sections.push(`difficulty=${seed.difficulty}`);
+  sections.push(`vulnerabilityType=${seed.vulnerabilityType}`);
+  sections.push(`standardReference=${seed.standardReference}`);
+  sections.push(`title=${seed.title}`);
+  sections.push(`taskInstruction=${TASK_TYPE_INSTRUCTIONS[taskType]}`);
+
+  sections.push('');
+  sections.push('EVIDENCE_MAP');
+  for (const [index, step] of seed.evidenceFlow.entries()) {
+    const symbol = step.ref.symbol ? ` symbol=${step.ref.symbol}` : '';
+    sections.push(`${index + 1}. ${step.label}: ${step.ref.path}:L${step.ref.startLine}-${step.ref.endLine}${symbol}`);
+    sections.push(`   ${step.summary}`);
+  }
+
+  sections.push('');
+  sections.push('SOURCE_REFS');
+  for (const ref of seed.sourceRefs) {
+    const symbol = ref.symbol ? ` symbol=${ref.symbol}` : '';
+    sections.push(`- ${ref.role}: ${ref.path}:L${ref.startLine}-${ref.endLine}${symbol}`);
+  }
+
+  if (sourceSnippets.length > 0) {
+    sections.push('');
+    sections.push('SOURCE_SNIPPETS');
+    for (const snippet of sourceSnippets.slice(0, BRIEF_SOURCE_SNIPPET_LIMIT)) {
+      const symbol = snippet.ref.symbol ? ` symbol=${snippet.ref.symbol}` : '';
+      sections.push(`### ${snippet.ref.role} ${snippet.ref.path}:L${snippet.ref.startLine}-${snippet.ref.endLine}${symbol}`);
+      sections.push('```java');
+      sections.push(limitPromptText(snippet.numberedCode, BRIEF_SOURCE_SNIPPET_CHAR_LIMIT));
+      sections.push('```');
+    }
+  }
+
+  sections.push('');
+  sections.push('QUESTION_DESIGN_CONSTRAINTS');
+  sections.push('- 只生成 1 道题，题干/选项/解析由 LLM 动态设计，事实边界必须来自本 brief。');
+  sections.push('- source/trace/fix/falsePositive 题使用真实源码事实，不要编造文件、方法、调用链或 sink。');
+  sections.push('- question 不要直接泄露 vulnerabilityType、findingSeedId、证据流结论或正确答案。');
+  sections.push('- 四个 options 必须使用同一种语法形态和接近长度，不能让正确项因文风、长度或术语密度显得特殊。');
+  sections.push(`- JSON 可省略 sourceRefs/evidenceFlow；后端会用 findingSeedId=${seed.id} 绑定可信元数据。`);
+  if (taskType === 'variant') {
+    sections.push(`- variantGuidance=${seed.variantGuidance}`);
+  }
+  if (seed.distractorGuidance.length > 0) {
+    sections.push(`- distractorIdeas=${seed.distractorGuidance.join(' / ')}`);
+  }
+  if (seed.remediationGuidance.length > 0) {
+    sections.push(`- remediationIdeas=${seed.remediationGuidance.join(' / ')}`);
+  }
+
+  return sections.join('\n');
+}
+
 export function getTaskTypeInstructions(): Record<ProjectAuditTaskType, string> {
   return TASK_TYPE_INSTRUCTIONS;
+}
+
+function limitPromptText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, maxChars).trimEnd()}\n...<snippet truncated for prompt brevity>`;
 }

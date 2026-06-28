@@ -22,6 +22,8 @@ import {
   type SourceProjectSelection,
 } from '@/lib/project-audit/types';
 
+const SSE_HEARTBEAT_INTERVAL_MS = 15 * 1000;
+
 function normalizeCoverageType(value?: string): string {
   return (value || '').toLowerCase().replace(/[\s\-_/()（）,，.:：]/g, '');
 }
@@ -109,6 +111,8 @@ export async function POST(request: NextRequest) {
       sourceProject,
       projectMode,
     } = body;
+    const requestStartedAt = Date.now();
+    console.info(`[agent-api] POST /api/agent action=${String(action || 'unknown')} stream=${Boolean(stream)} started`);
 
     const customHeaders = HeaderUtils.extractForwardHeaders(request.headers);
 
@@ -209,6 +213,8 @@ export async function POST(request: NextRequest) {
         }
 
         if (stream) {
+          let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
           const readableStream = new ReadableStream({
             start(controller) {
               const encoder = new TextEncoder();
@@ -243,12 +249,27 @@ export async function POST(request: NextRequest) {
                 }
 
                 closed = true;
+                if (heartbeatInterval) {
+                  clearInterval(heartbeatInterval);
+                  heartbeatInterval = null;
+                }
                 try {
                   controller.close();
                 } catch {
                   // Ignore invalid state after disconnect
                 }
               };
+
+              heartbeatInterval = setInterval(() => {
+                if (closed) {
+                  if (heartbeatInterval) {
+                    clearInterval(heartbeatInterval);
+                    heartbeatInterval = null;
+                  }
+                  return;
+                }
+                send({ type: 'ping', timestamp: Date.now() });
+              }, SSE_HEARTBEAT_INTERVAL_MS);
 
               (async () => {
                 try {
@@ -281,6 +302,9 @@ export async function POST(request: NextRequest) {
                     onProgress: (current, total) => {
                       send({ type: 'progress', current, total });
                     },
+                    onUsage: (usage) => {
+                      send({ type: 'usage', usage });
+                    },
                   });
 
                   if (streamedResult.success) {
@@ -296,11 +320,14 @@ export async function POST(request: NextRequest) {
                         retrievalTrace: streamedResult.retrievalTrace,
                       },
                     });
+                    console.info(`[agent-api] POST /api/agent action=generateQuizSet stream=true completed status=success durationMs=${Date.now() - requestStartedAt} tokens=${streamedResult.usage?.totalTokens || 0}`);
                   } else {
                     send({
                       type: 'error',
                       error: getPrimaryQuizGenerationError(streamedResult.errors),
+                      usage: streamedResult.usage,
                     });
+                    console.info(`[agent-api] POST /api/agent action=generateQuizSet stream=true completed status=error durationMs=${Date.now() - requestStartedAt} tokens=${streamedResult.usage?.totalTokens || 0}`);
                   }
 
                   safeClose();
@@ -310,14 +337,23 @@ export async function POST(request: NextRequest) {
                     type: 'error',
                     error: error instanceof Error ? error.message : '题目集生成失败',
                   });
+                  console.info(`[agent-api] POST /api/agent action=generateQuizSet stream=true completed status=exception durationMs=${Date.now() - requestStartedAt}`);
                   safeClose();
                 } finally {
                   request.signal.removeEventListener('abort', handleAbort);
+                  if (heartbeatInterval) {
+                    clearInterval(heartbeatInterval);
+                    heartbeatInterval = null;
+                  }
                 }
               })();
             },
             cancel() {
               // client disconnected
+              if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+              }
             },
           });
 

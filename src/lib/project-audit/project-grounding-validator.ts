@@ -14,7 +14,7 @@
 import type { Question } from '@/lib/agents/question-generator-agent';
 import {
   getProjectFindingSeed,
-} from './source-code-findings';
+} from './finding-seed-repository';
 import { readProjectSourceSnippet } from './source-reader';
 import {
   isProjectAuditTaskType,

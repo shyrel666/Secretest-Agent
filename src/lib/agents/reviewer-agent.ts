@@ -8,7 +8,7 @@ import type { SearchResultItem } from '@/lib/knowledge';
 import { parseReviewOutput } from './output-schemas';
 import { validateStandardAlignedQuestion } from './standard-alignment-validator';
 import { validateProjectGroundedQuestion } from '@/lib/project-audit/project-grounding-validator';
-import { getProjectFindingSeed } from '@/lib/project-audit/source-code-findings';
+import { getProjectFindingSeed } from '@/lib/project-audit/finding-seed-repository';
 
 // 审核Agent的系统提示词
 const REVIEWER_PROMPT = `你是一位资深的代码安全审计专家，负责审核测评题目的质量和准确性。
@@ -62,13 +62,18 @@ export interface ReviewResult {
   correctedQuestion?: Question;
 }
 
+const REVIEW_TIMEOUT_MS = 5 * 60 * 1000;
+
 export class ReviewerAgent {
   private llmClient: LLMClient;
   private toolbox: InternalMcpToolbox;
   private config: ModelConfig;
 
   constructor(customHeaders?: Record<string, string>, config?: ModelConfig, cozeConfig?: CozeConfig) {
-    const configInstance = new Config(cozeConfig);
+    const configInstance = new Config({
+      ...cozeConfig,
+      timeout: cozeConfig?.timeout ?? REVIEW_TIMEOUT_MS,
+    });
     this.llmClient = new LLMClient(configInstance, customHeaders);
     this.toolbox = new InternalMcpToolbox({
       apiKey: cozeConfig?.apiKey || process.env.COZE_WORKLOAD_IDENTITY_API_KEY || '',

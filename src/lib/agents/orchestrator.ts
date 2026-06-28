@@ -155,6 +155,7 @@ export class AgentOrchestrator {
     coveredVulnerabilityTypes?: string[];
     maxRetries?: number;
     shouldAbort?: () => boolean;
+    onAttempt?: (attempt: number, maxRetries: number) => void;
     projectSeed?: import('@/lib/project-audit/types').ProjectSeedPlanEntry;
   }): Promise<{
     success: boolean;
@@ -171,16 +172,31 @@ export class AgentOrchestrator {
   }> {
     const maxRetries = params.maxRetries || 3;
     let attempts = 0;
+    const usages: TokenUsage[] = [];
+    const citations: ToolCitation[] = [];
+    const groundingIssues: string[] = [];
+    const retrievalTrace: RetrievalTraceItem[] = [];
+    const errors: string[] = [];
 
     while (attempts < maxRetries) {
       if (params.shouldAbort?.()) {
         return {
           success: false,
+          usage: usages.length > 0 ? sumTokenUsage(usages) : undefined,
+          citations: mergeCitations(citations),
+          grounding: groundingIssues.length > 0
+            ? {
+              grounded: false,
+              issues: groundingIssues,
+            }
+            : undefined,
+          retrievalTrace,
           error: '题目生成已取消',
         };
       }
 
       attempts++;
+      params.onAttempt?.(attempts, maxRetries);
 
       const genResult = await this.questionGenerator.generateQuestion({
         language: params.projectSeed ? 'java' : params.language,
@@ -198,7 +214,17 @@ export class AgentOrchestrator {
           : undefined,
       });
 
+      if (genResult.usage) {
+        usages.push(genResult.usage);
+      }
+      citations.push(...(genResult.citations || []));
+      retrievalTrace.push(...(genResult.retrievalTrace || []));
+      if (genResult.grounding?.issues?.length) {
+        groundingIssues.push(...genResult.grounding.issues);
+      }
+
       if (!genResult.success || !genResult.questions?.[0]) {
+        errors.push(genResult.error || `第 ${attempts} 次候选题生成失败`);
         continue;
       }
 
@@ -207,6 +233,15 @@ export class AgentOrchestrator {
       if (params.shouldAbort?.()) {
         return {
           success: false,
+          usage: usages.length > 0 ? sumTokenUsage(usages) : undefined,
+          citations: mergeCitations(citations),
+          grounding: groundingIssues.length > 0
+            ? {
+              grounded: false,
+              issues: groundingIssues,
+            }
+            : undefined,
+          retrievalTrace,
           error: '题目生成已取消',
         };
       }
@@ -226,17 +261,30 @@ export class AgentOrchestrator {
           success: true,
           question: shuffleQuestionOptions(question),
           reviewScore: FAST_REVIEW_SCORE,
-          usage: genResult.usage,
-          citations: genResult.citations,
-          grounding: genResult.grounding,
+          usage: sumTokenUsage(usages),
+          citations: mergeCitations(citations),
+          grounding: groundingIssues.length > 0
+            ? {
+              grounded: Boolean(genResult.grounding?.grounded ?? true),
+              issues: groundingIssues,
+            }
+            : genResult.grounding,
           retrievalTrace: [
-            ...(genResult.retrievalTrace || []),
+            ...retrievalTrace,
             buildFastReviewTrace(question),
           ],
         };
       }
 
       const reviewResult = await this.reviewerAgent.reviewAndFix(question);
+      if (reviewResult.usage) {
+        usages.push(reviewResult.usage);
+      }
+      citations.push(...(reviewResult.citations || []));
+      retrievalTrace.push(...(reviewResult.retrievalTrace || []));
+      if (reviewResult.grounding?.issues?.length) {
+        groundingIssues.push(...reviewResult.grounding.issues);
+      }
 
       if (reviewResult.success && reviewResult.question) {
         if (!params.projectSeed) {
@@ -254,16 +302,33 @@ export class AgentOrchestrator {
           success: true,
           question: finalizedQuestion,
           reviewScore: reviewResult.review?.score || 0,
-          usage: sumTokenUsage([genResult.usage, reviewResult.usage]),
-          citations: mergeCitations(genResult.citations, reviewResult.citations),
-          grounding: combineGrounding(genResult.grounding, reviewResult.grounding),
-          retrievalTrace: [...(genResult.retrievalTrace || []), ...(reviewResult.retrievalTrace || [])],
+          usage: sumTokenUsage(usages),
+          citations: mergeCitations(citations),
+          grounding: combineGrounding(
+            genResult.grounding,
+            {
+              grounded: Boolean(reviewResult.grounding?.grounded ?? true) && groundingIssues.length === 0,
+              issues: groundingIssues,
+            },
+          ),
+          retrievalTrace,
         };
       }
+
+      errors.push(reviewResult.error || `第 ${attempts} 次题目审核失败`);
     }
 
     return {
       success: false,
+      usage: usages.length > 0 ? sumTokenUsage(usages) : undefined,
+      citations: mergeCitations(citations),
+      grounding: groundingIssues.length > 0
+        ? {
+          grounded: false,
+          issues: groundingIssues,
+        }
+        : undefined,
+      retrievalTrace,
       error: `经过${maxRetries}次尝试后仍无法生成合格题目`,
     };
   }
@@ -278,6 +343,7 @@ export class AgentOrchestrator {
     coveredVulnerabilityTypes?: string[];
     onProgress?: (current: number, total: number) => void;
     onStage?: (stage: { label: string; detail: string; progress: number }) => void;
+    onUsage?: (usage: TokenUsage) => void;
     shouldAbort?: () => boolean;
     sourceProject?: SourceProjectSelection;
     projectMode?: ProjectMode;
@@ -312,6 +378,14 @@ export class AgentOrchestrator {
     const questions: Question[] = [];
     const errors: string[] = [];
     const usages: TokenUsage[] = [];
+    const collectUsage = (usage?: TokenUsage) => {
+      if (!usage) {
+        return;
+      }
+
+      usages.push(usage);
+      params.onUsage?.(usage);
+    };
     const citations: ToolCitation[] = [];
     const groundingIssues: string[] = [];
     const retrievalTrace: RetrievalTraceItem[] = [];
@@ -354,13 +428,22 @@ export class AgentOrchestrator {
         projectSeed: entry,
       }))
       : buildSeedPlan(total, coverageTargets);
-    // 项目补题只排除已接受或当前批次正在生成的 seed。首轮失败的 seed 允许继续重试，
-    // 避免把“未生成成功”的源码点永久烧掉，导致补题池很快耗尽。
+    // 项目补题需要排除：首轮已规划的 seed（无论生成成功与否）、已接受的 seed、
+    // 当前补题批次正在占用的 seed、以及历史上补题尝试过的失败 seed。
+    // 避免重复尝试同一失败 seed 导致无限重试和额度浪费。
+    const initialProjectSeedIds = new Set<string>();
+    for (const entry of seedEntries) {
+      if (entry.projectSeed) {
+        initialProjectSeedIds.add(entry.projectSeed.seed.id);
+      }
+    }
     const acceptedProjectSeedIds = new Set<string>();
     const reservedProjectSeedIds = new Set<string>();
+    const attemptedProjectSeedIds = new Set<string>(initialProjectSeedIds);
     const getUnavailableProjectSeedIds = () => new Set<string>([
       ...acceptedProjectSeedIds,
       ...reservedProjectSeedIds,
+      ...attemptedProjectSeedIds,
     ]);
     let supplementAttemptCount = 0;
     let duplicateTypeRejectCount = 0;
@@ -368,7 +451,9 @@ export class AgentOrchestrator {
     let reviewFailureCount = 0;
     let generationFailureCount = 0;
     const abortedError = '题目集生成已取消';
-    const maxSupplementAttemptCount = Math.max(total * 5, 12);
+    const maxSupplementAttemptCount = isProjectModeActive
+      ? Math.max(total, Math.min(total * 2, 12))
+      : Math.max(total * 3, 8);
     // 种子生成阶段每个槽位最多重试次数：与 generateApprovedQuestion 默认 maxRetries 对齐。
     // generateQuestion 的校验链很长（schema→标准对齐→grounding→相似度等），任何一环随机
     // 失败都会丢掉这道候选；count:1 只有单次机会时几个槽位失败即导致 questions.length < total，
@@ -387,86 +472,129 @@ export class AgentOrchestrator {
     });
 
     let completedSeedSlots = 0;
-    const seedSlotResults = await mapWithConcurrency(seedEntries, reviewConcurrency, async (entry, index) => {
-      const slot = entry as {
-        difficulty: 'easy' | 'medium' | 'hard';
-        count: number;
-        target?: { title?: string; clauseNumber?: string };
-        projectSeed?: import('@/lib/project-audit/types').ProjectSeedPlanEntry;
-      };
-      if (!slot.count || params.shouldAbort?.()) {
-        return {
-          index,
-          result: null,
+    if (isProjectModeActive) {
+      const seedSlotResults = await mapWithConcurrency(seedEntries, reviewConcurrency, async (entry, index) => {
+        const slot = entry as {
+          difficulty: 'easy' | 'medium' | 'hard';
+          count: number;
+          target?: { title?: string; clauseNumber?: string };
+          projectSeed?: import('@/lib/project-audit/types').ProjectSeedPlanEntry;
         };
-      }
-
-      let result: QuestionGenResult | null = null;
-      const excludedTypesForSlot = params.vulnerabilityType || isProjectModeActive
-        ? []
-        : buildSeedExcludedTypesSnapshot(seedEntries, index);
-
-      for (let attempt = 1; attempt <= seedGenerationMaxAttempts; attempt++) {
-        if (params.shouldAbort?.()) {
-          break;
+        if (!slot.count || params.shouldAbort?.()) {
+          return {
+            index,
+            result: null,
+          };
         }
+
+        let result: QuestionGenResult | null = null;
+        for (let attempt = 1; attempt <= seedGenerationMaxAttempts; attempt++) {
+          if (params.shouldAbort?.()) {
+            break;
+          }
+          params.onStage?.({
+            label: '生成候选题目',
+            detail: slot.projectSeed
+              ? `正在让 LLM 阅读项目 brief 并生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度项目题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`
+              : `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度候选题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`,
+            progress: getSeedGenerationProgress(slot.difficulty),
+          });
+
+          result = await this.questionGenerator.generateQuestion({
+            language: slot.projectSeed ? 'java' : params.language,
+            difficulty: slot.difficulty,
+            vulnerabilityType: slot.projectSeed ? slot.projectSeed.seed.vulnerabilityType : (params.vulnerabilityType || slot.target?.title),
+            targetClauseNumber: slot.projectSeed ? slot.projectSeed.seed.standardReference.match(/\d+(?:\.\d+)+/)?.[0] : slot.target?.clauseNumber,
+            excludedVulnerabilityTypes: [],
+            coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
+            count: slot.count,
+            projectSeed: slot.projectSeed
+              ? {
+                seed: slot.projectSeed.seed,
+                taskType: slot.projectSeed.taskType,
+              }
+              : undefined,
+          });
+          collectUsage(result.usage);
+
+          if (result.success && result.questions?.length) {
+            break;
+          }
+        }
+
+        completedSeedSlots += 1;
         params.onStage?.({
           label: '生成候选题目',
-          detail: slot.projectSeed
-            ? `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度项目题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`
-            : `正在生成第 ${index + 1}/${total} 道 ${difficultyLabelMap[slot.difficulty]}难度候选题${attempt > 1 ? `（重试 ${attempt}/${seedGenerationMaxAttempts}）` : ''}…`,
+          detail: `已完成 ${completedSeedSlots}/${seedEntries.length} 个候选槽位生成…`,
           progress: getSeedGenerationProgress(slot.difficulty),
         });
 
-        result = await this.questionGenerator.generateQuestion({
-          language: slot.projectSeed ? 'java' : params.language,
-          difficulty: slot.difficulty,
-          vulnerabilityType: slot.projectSeed ? slot.projectSeed.seed.vulnerabilityType : (params.vulnerabilityType || slot.target?.title),
-          targetClauseNumber: slot.projectSeed ? slot.projectSeed.seed.standardReference.match(/\d+(?:\.\d+)+/)?.[0] : slot.target?.clauseNumber,
-          excludedVulnerabilityTypes: excludedTypesForSlot,
-          coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
-          count: slot.count,
-          projectSeed: slot.projectSeed
-            ? {
-              seed: slot.projectSeed.seed,
-              taskType: slot.projectSeed.taskType,
-            }
-            : undefined,
-        });
-
-        if (result.success && result.questions?.length) {
-          break;
-        }
-      }
-
-      completedSeedSlots += 1;
-      params.onStage?.({
-        label: '生成候选题目',
-        detail: `已完成 ${completedSeedSlots}/${seedEntries.length} 个候选槽位生成…`,
-        progress: getSeedGenerationProgress(slot.difficulty),
+        return {
+          index,
+          result,
+        };
       });
 
-      return {
-        index,
-        result,
-      };
-    });
+      for (const { index, result: seedResult } of seedSlotResults) {
+        citations.push(...(seedResult?.citations || []));
+        retrievalTrace.push(...(seedResult?.retrievalTrace || []));
+        if (seedResult?.grounding?.issues?.length) {
+          groundingIssues.push(...seedResult.grounding.issues);
+        }
 
-    for (const { index, result: seedResult } of seedSlotResults) {
-      if (seedResult?.usage) {
-        usages.push(seedResult.usage);
+        if (seedResult?.success && seedResult.questions?.length) {
+          seedQuestions.push(...seedResult.questions);
+        } else {
+          generationFailureCount++;
+          errors.push(seedResult?.error || `第 ${index + 1} 道候选题生成失败`);
+        }
       }
-      citations.push(...(seedResult?.citations || []));
-      retrievalTrace.push(...(seedResult?.retrievalTrace || []));
-      if (seedResult?.grounding?.issues?.length) {
-        groundingIssues.push(...seedResult.grounding.issues);
-      }
+    } else {
+      const batchRequests = buildStandardBatchRequests(total, coverageTargets);
+      const batchResults = await mapWithConcurrency(batchRequests, reviewConcurrency, async (batch, batchIndex) => {
+        if (params.shouldAbort?.()) {
+          return {
+            batchIndex,
+            result: null,
+          };
+        }
 
-      if (seedResult?.success && seedResult.questions?.length) {
-        seedQuestions.push(...seedResult.questions);
-      } else {
-        generationFailureCount++;
-        errors.push(seedResult?.error || `第 ${index + 1} 道候选题生成失败`);
+        params.onStage?.({
+          label: '批量生成候选题目',
+          detail: `正在批量生成第 ${batchIndex + 1}/${batchRequests.length} 批候选题（${batch.count} 道）…`,
+          progress: 24 + Math.round((batchIndex / Math.max(batchRequests.length, 1)) * 28),
+        });
+
+        const result = await this.questionGenerator.generateQuestion({
+          language: params.language,
+          difficulty: 'mixed',
+          vulnerabilityType: params.vulnerabilityType,
+          excludedVulnerabilityTypes: params.vulnerabilityType ? [] : [],
+          coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
+          count: batch.count,
+          coverageTargets: batch.coverageTargets,
+        });
+        collectUsage(result.usage);
+
+        return {
+          batchIndex,
+          result,
+        };
+      });
+
+      for (const { batchIndex, result: batchResult } of batchResults) {
+        citations.push(...(batchResult?.citations || []));
+        retrievalTrace.push(...(batchResult?.retrievalTrace || []));
+        if (batchResult?.grounding?.issues?.length) {
+          groundingIssues.push(...batchResult.grounding.issues);
+        }
+
+        if (batchResult?.success && batchResult.questions?.length) {
+          seedQuestions.push(...batchResult.questions);
+        } else {
+          generationFailureCount++;
+          errors.push(batchResult?.error || `第 ${batchIndex + 1} 批候选题生成失败`);
+        }
       }
     }
 
@@ -498,7 +626,7 @@ export class AgentOrchestrator {
       });
 
       if (reviewResult.usage) {
-        usages.push(reviewResult.usage);
+        collectUsage(reviewResult.usage);
       }
       citations.push(...(reviewResult.citations || []));
       retrievalTrace.push(...(reviewResult.retrievalTrace || []));
@@ -556,10 +684,12 @@ export class AgentOrchestrator {
       params.onProgress?.(Math.min(batchStartIndex + 1, total), total);
       params.onStage?.({
         label: '补齐缺失题目',
-        detail: relaxTypeUniqueness
-          ? `候选类型不足，正在放宽类型限制并发补 ${supplementBatchSize} 道候选题…`
-          : `候选题不足，正在并发补 ${supplementBatchSize} 道候选题…`,
-        progress: getFallbackProgress(batchStartIndex + 1, total),
+        detail: isProjectModeActive
+          ? `候选题不足，正在并发补 ${supplementBatchSize} 道项目源码题…`
+          : relaxTypeUniqueness
+            ? `候选类型不足，正在放宽类型限制并发补 ${supplementBatchSize} 道候选题…`
+            : `候选题不足，正在并发补 ${supplementBatchSize} 道候选题…`,
+        progress: getSupplementAttemptProgress(supplementAttemptCount, maxSupplementAttemptCount),
       });
 
       const excludedTypesSnapshot = allowSameVulnerabilityType
@@ -586,7 +716,20 @@ export class AgentOrchestrator {
             if (candidate) {
               projectSeed = candidate;
               reservedProjectSeedIds.add(candidate.seed.id);
+              attemptedProjectSeedIds.add(candidate.seed.id);
             }
+          }
+
+          // 项目模式下没有可用 seed 时直接失败，避免回退到标准题并浪费大量额度重试。
+          if (isProjectModeActive && !projectSeed) {
+            return {
+              questionNumber: targetQuestionIndex + 1,
+              projectSeedId: undefined,
+              result: {
+                success: false,
+                error: '项目源码 seed 已耗尽，无法继续补题',
+              },
+            };
           }
 
           const result = await this.generateApprovedQuestion({
@@ -600,8 +743,22 @@ export class AgentOrchestrator {
               : (params.vulnerabilityType ? undefined : supplementTarget?.clauseNumber),
             excludedVulnerabilityTypes: params.vulnerabilityType ? [] : excludedTypesSnapshot,
             coveredVulnerabilityTypes: params.coveredVulnerabilityTypes,
-            maxRetries: Math.max(6, missingCount * 3),
+            // 补题阶段的目标是快速探索新的 seed/条款，而不是在同一失败候选上长时间空转。
+            // 项目源码题由 seed 固定，一次失败后换下一个 seed 更容易收敛；标准题保留少量重试即可。
+            maxRetries: projectSeed ? 1 : 2,
             shouldAbort: params.shouldAbort,
+            onAttempt: (attempt, maxRetries) => {
+              params.onStage?.({
+                label: '补齐缺失题目',
+                detail: projectSeed
+                  ? `正在补第 ${targetQuestionIndex + 1}/${total} 道项目源码题（候选 ${batchIndex + 1}/${supplementBatchSize}，尝试 ${attempt}/${maxRetries}）…`
+                  : `正在补第 ${targetQuestionIndex + 1}/${total} 道标准题（候选 ${batchIndex + 1}/${supplementBatchSize}，尝试 ${attempt}/${maxRetries}）…`,
+                progress: getSupplementAttemptProgress(
+                  Math.min(attemptNumber - 1 + attempt / maxRetries, maxSupplementAttemptCount),
+                  maxSupplementAttemptCount,
+                ),
+              });
+            },
             projectSeed,
           });
 
@@ -624,7 +781,7 @@ export class AgentOrchestrator {
         }
 
         if (result.usage) {
-          usages.push(result.usage);
+          collectUsage(result.usage);
         }
         citations.push(...(result.citations || []));
         retrievalTrace.push(...(result.retrievalTrace || []));
@@ -664,9 +821,15 @@ export class AgentOrchestrator {
         questions.push(shuffleQuestionOptions(result.question));
       }
 
+      params.onStage?.({
+        label: '补齐缺失题目',
+        detail: `已完成 ${Math.min(supplementAttemptCount, maxSupplementAttemptCount)}/${maxSupplementAttemptCount} 个补题候选槽位，当前已生成 ${questions.length}/${total} 道…`,
+        progress: getSupplementAttemptProgress(supplementAttemptCount, maxSupplementAttemptCount),
+      });
+
       // 一整批补题都没能新增题目（通常是唯一类型已耗尽或反复命中重复类型），
       // 放宽类型唯一性约束，让后续补题可以用同类型不同内容的题目凑齐名额。
-      if (!relaxTypeUniqueness && questions.length === questionsCountBeforeBatch && !params.vulnerabilityType) {
+      if (!isProjectModeActive && !relaxTypeUniqueness && questions.length === questionsCountBeforeBatch && !params.vulnerabilityType) {
         relaxTypeUniqueness = true;
       }
     }
@@ -1159,12 +1322,41 @@ function pickProjectSupplementSeed(params: {
     projectMode: params.projectMode,
     coveredSeedIds: Array.from(params.excludedSeedIds),
   });
-  if (candidates.length === 0) {
+  // buildProjectSeedPlan 在所有 seed 都被 covered 时会回退到全量候选，
+  // 补题场景必须再次过滤，防止重复尝试已失败/已用的 seed。
+  const available = candidates.filter((entry) => !params.excludedSeedIds.has(entry.seed.id));
+  if (available.length === 0) {
     return undefined;
   }
   // 优先难度匹配，否则取任意可用的 seed
-  const exactDifficulty = candidates.find((entry) => entry.difficulty === params.difficulty);
-  return exactDifficulty || candidates[0];
+  const exactDifficulty = available.find((entry) => entry.difficulty === params.difficulty);
+  return exactDifficulty || available[0];
+}
+
+function buildStandardBatchRequests(
+  total: number,
+  coverageTargets: CoverageTarget[],
+): Array<{
+  count: number;
+  coverageTargets: Array<{ title?: string; clauseNumber?: string }>;
+}> {
+  const requests: Array<{
+    count: number;
+    coverageTargets: Array<{ title?: string; clauseNumber?: string }>;
+  }> = [];
+
+  for (let start = 0; start < total; start += STANDARD_BATCH_GENERATION_SIZE) {
+    const count = Math.min(STANDARD_BATCH_GENERATION_SIZE, total - start);
+    requests.push({
+      count,
+      coverageTargets: coverageTargets.slice(start, start + count).map((target) => ({
+        title: target.title,
+        clauseNumber: target.clauseNumber,
+      })),
+    });
+  }
+
+  return requests;
 }
 
 const difficultyLabelMap: Record<'easy' | 'medium' | 'hard', string> = {
@@ -1174,6 +1366,7 @@ const difficultyLabelMap: Record<'easy' | 'medium' | 'hard', string> = {
 };
 
 const FAST_REVIEW_SCORE = 88;
+const STANDARD_BATCH_GENERATION_SIZE = 5;
 
 function getSeedGenerationProgress(difficulty: 'easy' | 'medium' | 'hard'): number {
   if (difficulty === 'easy') {
@@ -1195,12 +1388,12 @@ function getReviewProgress(current: number, total: number): number {
   return Math.min(88, Math.round(62 + (current / total) * 26));
 }
 
-function getFallbackProgress(current: number, total: number): number {
-  if (total <= 0) {
+function getSupplementAttemptProgress(currentAttemptSlot: number, maxAttemptSlots: number): number {
+  if (maxAttemptSlots <= 0) {
     return 90;
   }
 
-  return Math.min(94, Math.round(88 + (current / total) * 6));
+  return Math.min(94, Math.round(88 + (currentAttemptSlot / maxAttemptSlots) * 6));
 }
 
 function buildQuestionDedupeKey(question: Question, allowSameVulnerabilityType: boolean): string {
@@ -1233,6 +1426,16 @@ function isQuestionTooSimilarToExisting(candidate: Question, acceptedQuestions: 
   const candidateStem = normalizeQuestionStem(candidate.question);
 
   return acceptedQuestions.some((question) => {
+    if (
+      candidate.sourceProject
+      && candidate.findingSeedId
+      && question.sourceProject
+      && question.findingSeedId
+      && candidate.findingSeedId !== question.findingSeedId
+    ) {
+      return false;
+    }
+
     const existingCode = normalizeCodeForSimilarity(question.code);
     const existingLines = splitCodeLines(existingCode);
     const lineOverlap = calculateLineOverlapRatio(candidateLines, existingLines);

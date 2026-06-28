@@ -9,7 +9,7 @@
  * - 难度按总题数均匀分布 easy/medium/hard
  */
 
-import { getProjectFindingSeeds } from './source-code-findings';
+import { getProjectFindingSeeds } from './finding-seed-repository';
 import {
   isProjectId,
   type ProjectAuditFindingSeed,

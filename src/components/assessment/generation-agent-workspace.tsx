@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle, Circle, Loader2, Terminal } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Circle, Loader2, RefreshCw, Terminal, XCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { formatAgentElapsed } from '@/lib/format-agent-elapsed';
 import { sanitizeGenerationStageDetail } from '@/lib/sanitize-generation-stage-detail';
 import { cn } from '@/lib/utils';
@@ -27,6 +28,8 @@ interface GenerationAgentWorkspaceProps {
   flowStages: readonly FlowStage[];
   questionCount: number;
   languageLabel: string;
+  onRetry?: () => void;
+  onBackToSetup?: () => void;
 }
 
 interface LogEntry {
@@ -73,21 +76,28 @@ export function GenerationAgentWorkspace({
   flowStages,
   questionCount,
   languageLabel,
+  onRetry,
+  onBackToSetup,
 }: GenerationAgentWorkspaceProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const consoleRef = useRef<HTMLDivElement>(null);
+  const isFailureStage = /失败|超时|取消/.test(stage.label);
 
   useEffect(() => {
     if (startTime == null) {
       setElapsedMs(0);
       return;
     }
+    if (isFailureStage) {
+      setElapsedMs(Date.now() - startTime);
+      return;
+    }
     const tick = () => setElapsedMs(Date.now() - startTime);
     tick();
     const id = window.setInterval(tick, 100);
     return () => window.clearInterval(id);
-  }, [startTime]);
+  }, [isFailureStage, startTime]);
 
   useEffect(() => {
     const agent = resolveActiveAgent(stage.label);
@@ -209,10 +219,25 @@ export function GenerationAgentWorkspace({
                 <p className="text-base font-medium text-foreground sm:text-lg">{stage.label}</p>
                 <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-primary/10">
                   <div
-                    className="agent-work-progress-fill h-full rounded-full transition-[width] duration-500 ease-out"
+                    className={cn(
+                      'h-full rounded-full transition-[width] duration-500 ease-out',
+                      isFailureStage ? 'bg-destructive' : 'agent-work-progress-fill',
+                    )}
                     style={{ width: `${progress}%` }}
                   />
                 </div>
+                {isFailureStage ? (
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                    <Button type="button" size="sm" className="gap-2" onClick={onRetry}>
+                      <RefreshCw className="h-4 w-4" />
+                      重试
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" className="gap-2" onClick={onBackToSetup}>
+                      <ArrowLeft className="h-4 w-4" />
+                      返回配置
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             </aside>
 
@@ -224,7 +249,7 @@ export function GenerationAgentWorkspace({
                   <span className="font-mono text-sm font-medium text-foreground sm:text-base">Live Output</span>
                 </div>
                 <span className="font-mono text-xs uppercase tracking-wider text-muted-foreground sm:text-sm">
-                  streaming
+                  {isFailureStage ? 'stopped' : 'streaming'}
                 </span>
               </div>
 
@@ -267,10 +292,14 @@ export function GenerationAgentWorkspace({
           {/* Status line */}
           <footer className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/70 bg-muted/20 px-5 py-3 font-mono text-xs sm:px-7 sm:py-3.5 sm:text-sm">
             <span className="flex items-center gap-1.5 text-muted-foreground">
-              <span className="agent-work-pulse-ring relative flex h-4 w-4 items-center justify-center">
-                <span className="agent-work-pulse-dot h-1.5 w-1.5 rounded-full bg-primary" />
-              </span>
-              running
+              {isFailureStage ? (
+                <XCircle className="h-4 w-4 text-destructive" />
+              ) : (
+                <span className="agent-work-pulse-ring relative flex h-4 w-4 items-center justify-center">
+                  <span className="agent-work-pulse-dot h-1.5 w-1.5 rounded-full bg-primary" />
+                </span>
+              )}
+              {isFailureStage ? 'failed' : 'running'}
             </span>
             <span className="hidden text-border sm:inline" aria-hidden="true">
               |

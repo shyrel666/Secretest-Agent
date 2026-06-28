@@ -339,6 +339,7 @@ export function QuizSessionWorkspace({
                   findingSeedId={question.findingSeedId}
                   sourceRefs={question.sourceRefs}
                   evidenceFlow={question.evidenceFlow}
+                  revealEvidenceFlow={false}
                 />
               ) : null}
 
@@ -398,6 +399,7 @@ export function QuizSessionWorkspace({
                   findingSeedId={question.findingSeedId}
                   sourceRefs={question.sourceRefs}
                   evidenceFlow={question.evidenceFlow}
+                  revealEvidenceFlow
                   className="mb-2"
                 />
               ) : null}

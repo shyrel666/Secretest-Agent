@@ -4,6 +4,7 @@ import { BookOpen, Circle, Sparkles, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { STANDARD_INFO, getLanguageLabel, type AssessmentLanguage } from '@/lib/standards';
 import { cn } from '@/lib/utils';
+import { ProjectSeedDiscoveryPanel } from './project-seed-discovery-panel';
 
 interface FlowStage {
   key: string;
@@ -26,8 +27,10 @@ interface AssessmentSetupWorkspaceProps {
   focusTopicTitle?: string;
   focusVulnerabilityType?: string;
   projectMode?: 'standard' | 'project';
+  sourceProject?: 'all' | 'YM_PT' | 'itstec-24';
   projectTaskMode?: 'source' | 'variant' | 'mixed';
   onProjectModeChange?: (mode: 'standard' | 'project') => void;
+  onSourceProjectChange?: (project: 'all' | 'YM_PT' | 'itstec-24') => void;
   onProjectTaskModeChange?: (mode: 'source' | 'variant' | 'mixed') => void;
 }
 
@@ -81,8 +84,10 @@ export function AssessmentSetupWorkspace({
   focusTopicTitle,
   focusVulnerabilityType,
   projectMode = 'standard',
+  sourceProject = 'all',
   projectTaskMode = 'source',
   onProjectModeChange,
+  onSourceProjectChange,
   onProjectTaskModeChange,
 }: AssessmentSetupWorkspaceProps) {
   const knowledgeProps = {
@@ -174,7 +179,7 @@ export function AssessmentSetupWorkspace({
                 </span>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-hidden px-5 py-4 sm:px-7 sm:py-5">
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-7 sm:py-5">
                 {focusTopicTitle ? (
                   <div className="mb-5 rounded-lg border border-primary/25 bg-primary/10 px-4 py-3 font-mono text-sm text-primary">
                     <span className="text-primary/70">focus </span>
@@ -308,6 +313,11 @@ export function AssessmentSetupWorkspace({
                         ))}
                       </div>
                     </div>
+                    <ProjectSeedDiscoveryPanel
+                      active={isProjectModeActive}
+                      sourceProject={sourceProject}
+                      onSourceProjectChange={onSourceProjectChange || (() => undefined)}
+                    />
                   </div>
                 ) : null}
 

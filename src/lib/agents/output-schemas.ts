@@ -4,9 +4,12 @@ import { sanitizeQuestionCode } from './code-sanitizer';
 import {
   isProjectAuditTaskType,
   isProjectId,
+  type ProjectAuditFindingSeed,
+  type ProjectAuditTaskType,
   type ProjectEvidenceStep,
   type ProjectSourceRef,
 } from '@/lib/project-audit/types';
+import { readProjectSourceSnippet } from '@/lib/project-audit/source-reader';
 
 const STANDARD_BY_LANGUAGE = {
   Java: 'GB/T 34944-2017',
@@ -176,14 +179,21 @@ export const reviewOutputSchema = z.object({
 export type QuestionOutput = z.infer<typeof questionOutputSchema>;
 export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
 
-export function parseQuestionOutput(raw: unknown): {
+export interface ProjectQuestionSeedContext {
+  seed: ProjectAuditFindingSeed;
+  taskType: ProjectAuditTaskType;
+}
+
+export function parseQuestionOutput(raw: unknown, projectSeed?: ProjectQuestionSeedContext): {
   success: true;
   question: Question;
 } | {
   success: false;
   issues: string[];
 } {
-  const parsed = questionOutputSchema.safeParse(raw);
+  const parsed = questionOutputSchema.safeParse(
+    projectSeed ? withProjectSeedMetadata(raw, projectSeed) : raw,
+  );
   if (!parsed.success) {
     return {
       success: false,
@@ -195,6 +205,70 @@ export function parseQuestionOutput(raw: unknown): {
     success: true,
     question: parsed.data,
   };
+}
+
+function withProjectSeedMetadata(raw: unknown, projectSeed: ProjectQuestionSeedContext): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return raw;
+  }
+
+  const modelOutput = raw as Record<string, unknown>;
+  const trustedSourceCode = projectSeed.taskType === 'variant'
+    ? ''
+    : getTrustedProjectSourceCode(projectSeed.seed);
+
+  return {
+    ...modelOutput,
+    code: trustedSourceCode || modelOutput.code,
+    language: 'Java',
+    explanation: withTrustedProjectEvidence(modelOutput.explanation, projectSeed),
+    vulnerabilityType: projectSeed.seed.vulnerabilityType,
+    standardReference: projectSeed.seed.standardReference,
+    sourceProject: projectSeed.seed.projectId,
+    auditTaskType: projectSeed.taskType,
+    findingSeedId: projectSeed.seed.id,
+    variantOfFindingId: projectSeed.taskType === 'variant' ? projectSeed.seed.id : undefined,
+    sourceRefs: projectSeed.seed.sourceRefs,
+    evidenceFlow: projectSeed.seed.evidenceFlow,
+  };
+}
+
+function getTrustedProjectSourceCode(seed: ProjectAuditFindingSeed): string {
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  for (const ref of seed.sourceRefs) {
+    const key = `${ref.projectId}:${ref.path}:${ref.startLine}-${ref.endLine}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    try {
+      const code = sanitizeQuestionCode(readProjectSourceSnippet(ref).code);
+      if (code) {
+        snippets.push(code);
+      }
+    } catch {
+      // 调用方会在项目上下文构建阶段处理源码读取失败；这里保留模型原始 code 作为兜底。
+    }
+  }
+
+  return snippets.join('\n\n');
+}
+
+function withTrustedProjectEvidence(explanation: unknown, projectSeed: ProjectQuestionSeedContext): string {
+  const base = typeof explanation === 'string' ? explanation.trim() : '';
+  const evidence = projectSeed.seed.sourceRefs
+    .map((ref) => `${ref.path}:${ref.startLine}-${ref.endLine}${ref.symbol ? ` ${ref.symbol}` : ''}`)
+    .join('；');
+  const trustedEvidence = `项目证据：${projectSeed.seed.projectId} ${evidence}；标准引用：${projectSeed.seed.standardReference}。`;
+
+  if (!base) {
+    return trustedEvidence;
+  }
+
+  return `${base}\n\n${trustedEvidence}`;
 }
 
 export function parseReviewOutput(raw: unknown): {
